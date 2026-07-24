@@ -1,0 +1,7 @@
+{
+  "name": "codex-delegate",
+  "description": "Delegate implementation work to a Codex worker while Claude stays the architect and reviewer.",
+  "version": "1.0.0",
+  "author": { "name": "Burak Erdemci" },
+  "keywords": ["codex", "delegation", "subagent", "mcp", "review"]
+}

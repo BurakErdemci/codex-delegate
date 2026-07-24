@@ -1,0 +1,11 @@
+{
+  "name": "codex-delegate",
+  "owner": { "name": "Burak Erdemci" },
+  "plugins": [
+    {
+      "name": "codex-delegate",
+      "source": "./",
+      "description": "Delegate implementation work to a Codex worker while Claude stays the architect and reviewer."
+    }
+  ]
+}
