@@ -84,10 +84,31 @@ their own compiler and runtime somewhere inside the installation; a small script
 that drives it directly gives you a real pass/fail without opening the editor.
 Write that script yourself, keep it in the repo, and point ACCEPTANCE at it.
 
-**Then verify the check can fail.** Introduce a deliberate syntax error, confirm
-the command exits non-zero, and revert. An acceptance command that passes on
-everything is worse than none, because it manufactures false confidence in both
-the worker's self-loop and your own audit. Do this once, when you write it.
+**Then verify the check can both fail AND pass.** Both directions, once, before
+you dispatch. It costs two minutes and it is the highest-yield step in the whole
+protocol.
+
+- **Can it fail?** Introduce a deliberate error, confirm non-zero exit, revert. A
+  command that passes on everything is worse than none: it manufactures false
+  confidence in the worker's self-loop and in your own audit.
+- **Can it pass?** Build a minimal correct fixture, confirm exit zero, delete the
+  fixture. This is the direction people skip and it is the more expensive
+  failure. A check that can never pass burns all five self-loop attempts and
+  returns `STATUS: failed` on work that was fine - and the changelog will blame
+  the implementation, not your checker.
+
+If you wrote the check yourself rather than pointing at a project runner, assume
+it is wrong until both directions are demonstrated. Two real examples, from a
+checker that read correctly on the page and still could never pass:
+
+- `re.compile(r"^- (/\S+)")`, used to pull file paths out of a report. Without
+  `re.MULTILINE` the `^` anchors to the start of the whole string, so it matched
+  nothing at all and every run failed identically.
+- The same pattern with `\S+` truncated each path at its first space. The
+  repository lived in `~/Documents/The Coding`, so every extracted path became
+  `/Users/me/Documents/The`. **Build the fixture with your real paths**, not with
+  `/tmp/foo.txt`; spaces, non-ASCII characters and symlinks all occur in real
+  project paths and none of them appear in a toy fixture.
 
 Say in the spec what the command does NOT prove. A compile check does not prove
 behaviour, and the worker must not treat green as done.

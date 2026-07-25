@@ -32,9 +32,17 @@ spec did not ask for, or anything you cannot point to a line for.
 
 ```
 VERDICT: approve | request-changes
+CHECKED: <spec GOAL in <=6 words> | <N> file(s) vs whitelist | acceptance: pass|fail|not-run
 <finding 1: file:line - what is wrong, one line>
 <finding 2: ...>
 ```
+
+The `CHECKED:` line is mandatory on **both** verdicts, and it is the point of the
+whole review. A bare `VERDICT: approve` is indistinguishable from a reviewer that
+never located the spec and rubber-stamped whatever it saw - and the architect
+reads only this file, so an evidence-free approval is accepted silently. Name
+what you actually looked at. If you could not find SPEC.md, say so there and
+return `request-changes`.
 
 Approve means you would ship it. If you request changes, every line must name a
 file and be specific enough to act on without asking you a question.

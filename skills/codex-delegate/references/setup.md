@@ -2,17 +2,38 @@
 
 ## One-time setup
 
+`$SKILL_DIR` is wherever this skill is installed. `$CLAUDE_PLUGIN_ROOT` is set for
+the plugin loader and **not** in your shell, so resolve the path first — pasting
+that variable into a terminal gives you an empty path:
+
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --init
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --smoke
+SKILL_DIR=$(find "$HOME/.claude" -maxdepth 6 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
+  | sed 's|/scripts/doctor.py||')
+echo "${SKILL_DIR:?codex-delegate scripts not found under ~/.claude}"
+
+python3 "$SKILL_DIR/scripts/doctor.py" --init
+python3 "$SKILL_DIR/scripts/doctor.py" --smoke
 ```
+
+No wildcards on purpose: zsh, the macOS default shell, aborts the entire command
+when a glob matches nothing. Whenever only one of the two install shapes exists -
+the normal case - a wildcard for the other one takes the command down with it.
 
 `--init` creates `~/.codex-worker` with a minimal config and links its login to
 your main Codex home. `--smoke` runs one tiny real turn, which is the only way to
 know the login and the protocol both work.
 
-Requirements: `codex` on PATH (0.145 or newer if you want to grant MCP servers),
-Python 3.11+, and a Codex login (`codex login`).
+Requirements:
+
+- `codex` on PATH, **0.145+** — `dispatch.py` refuses to run below that regardless
+  of whether you grant MCP servers.
+- A Codex login (`codex login`), before `--init`.
+- **Python 3.11+**, because both scripts import `tomllib`. Stock macOS
+  `/usr/bin/python3` is 3.9 and fails at import with
+  `ModuleNotFoundError: No module named 'tomllib'`. Check with
+  `python3 -c 'import tomllib'`; if it errors, use `python3.11`/`3.12`/`3.13`
+  (or `brew install python`) for every command in this document.
 
 ## Why the worker gets its own CODEX_HOME
 
@@ -28,8 +49,8 @@ checks are what actually catch a violation.
 ## Handing over an MCP server
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --list-mcp   # see what Claude has
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --add-mcp unityMCP
+python3 "$SKILL_DIR/scripts/doctor.py" --list-mcp   # see what Claude has
+python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp unityMCP
 ```
 
 `--list-mcp` marks a server `blocked` when it carries credentials, points at a

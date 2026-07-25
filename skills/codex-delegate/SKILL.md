@@ -25,9 +25,45 @@ The division that matters:
 The worker does mechanical correctness. Whether the result is *good* is never
 delegated.
 
-Script paths below assume a plugin install. If this skill was installed as a
-plain user skill instead, the scripts sit next to this file — use
-`~/.claude/skills/codex-delegate/scripts/` in place of `${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/`.
+## 0.1 Locate the scripts first (do this once per session)
+
+Every command in this document calls `$SKILL_DIR/scripts/...`. Resolve it before
+the first one, because `${CLAUDE_PLUGIN_ROOT}` is defined for the plugin loader
+and **not** in the shell you are about to run commands in - pasting it verbatim
+gives you an empty path and a confusing "No such file or directory".
+
+```bash
+SKILL_DIR=$(find "$HOME/.claude" -maxdepth 6 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
+  | sed 's|/scripts/doctor.py||')
+echo "${SKILL_DIR:?codex-delegate scripts not found under ~/.claude}"
+```
+
+No wildcards on purpose. **zsh is the default shell on macOS and aborts the whole
+command when a glob matches nothing** (`no matches found`), which is exactly what
+happens on a plugin-only or skill-only install - the pattern for the other shape
+matches nothing and takes the command down with it. `find` has no such behaviour
+and this form is identical under bash and zsh.
+
+Both install shapes are supported: as a plugin the scripts sit under
+`.../codex-delegate/<version>/skills/codex-delegate/scripts/`, as a plain user
+skill under `~/.claude/skills/codex-delegate/scripts/`. If both are present they
+can drift apart - `diff -r` them and delete the stale one.
+
+**Python 3.11+ is required for the scripts in this document**: both import
+`tomllib`, which does not exist before 3.11, and stock macOS `/usr/bin/python3`
+is 3.9.
+
+```bash
+python3 -c 'import sys,tomllib; print(sys.version.split()[0])' \
+  || echo "need Python 3.11+ (try python3.11/3.12/3.13, or brew install python)"
+```
+
+This applies to `doctor.py` and `dispatch.py` **only**. Do NOT carry that
+interpreter into the spec's ACCEPTANCE command: the project's test runner may
+live in a different Python, and pinning the wrong one makes acceptance fail for a
+reason that has nothing to do with the worker. Pick ACCEPTANCE's interpreter from
+the project, and prove it runs before dispatching (spec-template, "can it pass?").
 
 ## 0. Activation gate (MANDATORY, once per session)
 
@@ -62,6 +98,13 @@ suite, a mechanical multi-file refactor with crisp rules. Few large tasks beat
 many small ones - every delegation costs Claude a spec and an audit, while
 waiting on the worker is free.
 
+**Research also delegates well**, and for the same reason: a worker that reads a
+binary, a protocol schema and three prior implementations spends its own context
+doing it, and returns a report. If the deliverable is findings rather than
+product code, follow `references/research-task.md` - the git baseline, the
+acceptance command and the closeout step all change, and one of them backfires if
+you do not. Everything else in this protocol is unchanged.
+
 Do NOT delegate:
 - Architectural decisions, or anything needing design taste
 - Vague bug hunts - if you cannot write the spec, you cannot delegate it, and
@@ -73,12 +116,18 @@ Do NOT delegate:
 ## 3. Preflight
 
 ```bash
-ls .delegate-runs/*/IN_FLIGHT 2>/dev/null       # must be empty - the only hard gate
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --check   # worker home + login
-git rev-parse HEAD                              # record as BASE_SHA
-ls -dt .delegate-runs/*/ 2>/dev/null | head     # dirs older than ~3 days are
-                                                # abandoned tasks -> ask, then clean
+find .delegate-runs -maxdepth 2 -name IN_FLIGHT 2>/dev/null   # must print NOTHING
+python3 "$SKILL_DIR/scripts/doctor.py" --check                # worker home + login
+git rev-parse HEAD                                            # record as BASE_SHA
+find .delegate-runs -mindepth 1 -maxdepth 1 -type d 2>/dev/null  # dirs older than
+                                                # ~3 days are abandoned -> ask, then clean
 ```
+
+Glob-free again, and for the same reason as §0.1: under zsh
+`ls .delegate-runs/*/IN_FLIGHT 2>/dev/null` fails loudly with `no matches found`
+in the **normal** case - a repo with no runs in flight. The redirect does not
+suppress it, because the error comes from the shell's expansion, not from `ls`.
+Judge these by their output, not by their exit status.
 
 Run `--check` BEFORE writing the spec. It costs no model tokens, and a broken
 worker login otherwise surfaces only after the spec is written and dispatched.
@@ -88,8 +137,19 @@ snapshot the pre-existing dirty state as a baseline and let §6 isolate the
 worker's footprint by diffing against it:
 
 ```bash
-git status --porcelain > .delegate-runs/<task-id>/BASELINE.txt
+mkdir -p .delegate-runs/<task-id>
+git status --porcelain -uall > .delegate-runs/<task-id>/BASELINE.txt
 ```
+
+`mkdir -p` first: the directory is defined in §4, which comes later, and without
+it this line fails with "No such file or directory".
+
+**`-uall` is not optional.** Plain `git status --porcelain` collapses an entire
+untracked directory into one line, so anything the worker writes *inside* an
+untracked directory is invisible to the §7 footprint diff. Verified: a file
+planted at `.delegate-runs/some-other-run/STOLEN.txt` - a DO-NOT-TOUCH violation -
+produced no diff at all without `-uall`, and showed up immediately with it. Use
+the same flag in both places or the comparison is meaningless.
 
 Abort only on an existing IN_FLIGHT lock.
 
@@ -98,6 +158,7 @@ Abort only on an existing IN_FLIGHT lock.
 ```
 .delegate-runs/<task-id>/     # task-id: YYYY-MM-DD-shortname
     SPEC.md                   # durable contract - references/spec-template.md
+    BASELINE.txt              # pre-existing dirty state, written in §3
     PROMPT.txt                # worker contract + the one-line instruction
     IN_FLIGHT                 # exists from dispatch until closeout
     RAW_OUTPUT.log            # transcript - never read this on the happy path
@@ -111,7 +172,20 @@ task is not delegation-ready.
 
 Build `PROMPT.txt` as the full contents of `references/worker-contract.md`,
 followed by one line:
-`Read .delegate-runs/<task-id>/SPEC.md and execute it. Task dir: .delegate-runs/<task-id>/`
+
+```
+Read .delegate-runs/<task-id>/SPEC.md and execute it. Task dir: .delegate-runs/<task-id>/ — this is turn <N>; write your changelog to .delegate-runs/<task-id>/turn-<N>.md
+```
+
+**You own the turn counter.** Every dispatch is a cold start: `dispatch.py` opens
+a new thread, so the worker has no memory of earlier turns and cannot work out
+its own number. The contract tells it to write `turn-<N>.md` and §7 checks for
+exactly that file, so if you do not put N in the instruction line the worker
+writes `turn-1.md` every round - overwriting the only durable record of what the
+previous round did, and making §7 fail on work that was correct.
+
+Before each retry: bump N in that last line, and confirm `turn-<N-1>.md` is still
+on disk before dispatching.
 
 Disk is the durable state. Never architect around a session id; always architect
 around SPEC.md.
@@ -125,7 +199,16 @@ server; a pure refactor gets none.
 
 Two limits:
 
-- **Grant nothing else.** Servers the task does not need stay off, every time.
+- **Grant nothing else.** Name only what the task needs.
+
+  Know what `--mcp` actually does, though: it sets
+  `default_tools_approval_mode: approve` for the servers you name. It does **not**
+  switch the others off. Every server registered in the worker's
+  `~/.codex-worker/config.toml` still starts with the thread - verified: with no
+  `--mcp` at all, registered servers came up and reached `ready`. So registration
+  is the real grant, and `doctor.py --add-mcp` is the decision point, not dispatch
+  time. Keep the worker's config minimal; do not register a server you are not
+  prepared to hand over on some future task.
 - **Outward-facing servers need the user's word, per task.** A server that acts
   beyond this machine - sends mail, moves money, writes to a hosted service -
   must be named to the user in chat and approved before dispatch. Never hand one
@@ -139,9 +222,13 @@ footprint check, so the way to control them is to not authorise them.
 
 ## 6. Dispatch and lock
 
+`$SKILL_DIR` below is wherever this skill is installed - see §0.1. Run from the
+repository root: every `.delegate-runs/...` path here is relative to it, and
+`--repo "$PWD"` is what the worker gets as its working directory.
+
 ```bash
 touch .delegate-runs/<task-id>/IN_FLIGHT
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/dispatch.py" \
+python3 "$SKILL_DIR/scripts/dispatch.py" \
   --task-dir .delegate-runs/<task-id>/ \
   --repo "$PWD" \
   --prompt-file .delegate-runs/<task-id>/PROMPT.txt \
@@ -152,12 +239,25 @@ Run it in the background: the harness wakes you when it exits, so do not poll.
 
 **The lock is held until closeout (§9), NOT until the first result.** While
 IN_FLIGHT exists Claude must not write to the working tree, must not use the MCP
-servers granted to the worker, and must not start a second delegation. Reading,
-planning, reviewing and talking to the user are all fine. This survives context
-compaction, which is the point.
+servers granted to the worker, and must not start a second **implementation**
+delegation. Reading, planning, reviewing and talking to the user are all fine.
+This survives context compaction, which is the point.
 
-`dispatch.py` writes the transcript to `RAW_OUTPUT.log` and the worker's final
-report to `FINAL.txt`. Read `FINAL.txt`. The transcript exists for forensics.
+The §8 L1 review run is the single exception to the one-delegation rule: it is
+read-only, gets no MCP grant, and **must use its own task dir**
+(`.delegate-runs/<task-id>-review/`) so it cannot overwrite the worker's
+`FINAL.txt` or `RAW_OUTPUT.log`.
+
+**Check the exit status before reading anything.** `dispatch.py` exits non-zero
+when the turn never completed - timeout, protocol error, worker crash, codex not
+on PATH. On non-zero, `FINAL.txt` contains `DISPATCH FAILED: <reason>` instead of
+a report: tell the user what happened, read the tail of `RAW_OUTPUT.log` (the
+app-server's stderr is interleaved there and usually names the cause), and go to
+§10. Do not treat any other file on disk as this round's result.
+
+On success `dispatch.py` writes the transcript to `RAW_OUTPUT.log` and the
+worker's final report to `FINAL.txt`. Read `FINAL.txt`. The transcript exists for
+forensics.
 
 ## 7. Verify before trusting
 
@@ -169,7 +269,7 @@ code looks right.
 test -f .delegate-runs/<task-id>/turn-<N>.md   # missing -> UNTRUSTED, turn failed
 git rev-parse HEAD                             # must equal BASE_SHA
 git diff --cached --stat                       # must be empty
-git status --porcelain                         # footprint check vs BASELINE.txt
+git status --porcelain -uall                   # footprint check vs BASELINE.txt
 ```
 
 **Footprint check.** Diff the current `git status --porcelain` against
@@ -180,6 +280,11 @@ and report. Files already dirty at preflight are pre-existing noise, but flag an
 that are not whitelisted - the worker could have piggybacked on them and you
 cannot fully attribute them.
 
+**No repository?** The footprint check is the one safety mechanism you cannot
+simply drop. When the project is not under git - common for research tasks -
+substitute the mtime window in `references/research-task.md` §1. It attributes
+the worker's writes just as well; it only takes one extra line at preflight.
+
 Then run the acceptance command YOURSELF. The exit code is the verdict, not the
 worker's claim about it.
 
@@ -188,13 +293,37 @@ worker's claim about it.
 **L0 - worker self-loop (free).** The worker runs acceptance itself and fixes,
 max 5 attempts. Judge it by outcome, not by its self-reported attempt count.
 
-**L1 - Codex reviewer (free).** Dispatch a second, read-only run with
-`references/review-protocol.md` as the contract and `--sandbox read-only`. It
-gathers its own evidence: `git status --porcelain`, `git diff`, AND every
-untracked file - new files never appear in a diff, so a diff-only review of a
-file-creating task reviews nothing. Verdict comes back in FINAL.txt as <=5 lines.
-On `request-changes`, relay the findings verbatim into a retry. You are a courier
-here: do not interpret or pre-judge. Max 2 rounds.
+**L1 - Codex reviewer (free).** Build the reviewer's `PROMPT.txt` exactly the way
+§4 builds the worker's: the full contents of `references/review-protocol.md`,
+followed by one line naming what to review.
+
+```
+Review the current working tree against .delegate-runs/<task-id>/SPEC.md — that file holds the GOAL, the FILE WHITELIST and BASE_SHA. Pre-existing dirty state is listed in .delegate-runs/<task-id>/BASELINE.txt. Do not modify anything.
+```
+
+```bash
+python3 "$SKILL_DIR/scripts/dispatch.py" \
+  --task-dir .delegate-runs/<task-id>-review/ \
+  --repo "$PWD" \
+  --prompt-file .delegate-runs/<task-id>-review/PROMPT.txt \
+  --sandbox read-only
+```
+
+Its **own** task dir, and no `--mcp`. Reusing the worker's dir overwrites the
+worker's `FINAL.txt` and mixes two transcripts into one `RAW_OUTPUT.log`.
+
+Without that instruction line the reviewer has no way to find the spec: its
+contract says "read the SPEC.md you were pointed at" and nothing points at it. It
+then reviews the code for internal consistency alone, never checks the whitelist
+or the GOAL, and returns `approve`. A confident, evidence-free approval is the
+most expensive thing this protocol can produce.
+
+The reviewer gathers its own evidence: `git status --porcelain`, `git diff`, AND
+every untracked file - new files never appear in a diff, so a diff-only review of
+a file-creating task reviews nothing. Verdict comes back in that dir's FINAL.txt
+as <=5 lines. On `request-changes`, relay the findings verbatim into a retry (with
+the turn number bumped, §4). You are a courier here: do not interpret or
+pre-judge. Max 2 rounds.
 
 **L2 - runtime verification (the architect's own eyes).** A green acceptance
 command proves the code compiles and its unit checks pass. It does not prove the
@@ -227,15 +356,23 @@ There is no commit step. Delivery is a report to the user.
    first, delete second.
 3. The lock goes with it.
 
+That order assumes the chat report captures everything worth keeping, which holds
+when the deliverable is code - the code stays in the tree. It does not hold when
+the deliverable is a document that cites its own evidence by path. For those, see
+`references/research-task.md` §3: promote the report into the repo and keep the
+probe scripts its open questions depend on, *then* delete the rest.
+
 Abandoned task: summarise what was attempted, note the partial changes are
 uncommitted, delete the run dir.
 
 ## 10. Recovery
 
-One path. A fresh dispatch with the same PROMPT.txt but this instruction:
+One path. A fresh dispatch with the same PROMPT.txt but this instruction - and
+the turn number, for the same reason as §4:
 
-`Read .delegate-runs/<task-id>/SPEC.md. Assess the current working tree against it
-and complete what is missing.`
+```
+Read .delegate-runs/<task-id>/SPEC.md. Assess the current working tree against it and complete what is missing. Task dir: .delegate-runs/<task-id>/ — this is turn <N>; write your changelog to .delegate-runs/<task-id>/turn-<N>.md
+```
 
 The conversation is disposable; SPEC.md and the tree are the state. A fresh worker
 reading the real tree is more trustworthy than a resumed one trusting its memory.
@@ -245,4 +382,5 @@ reading the real tree is more trustworthy than a resumed one trusting its memory
 - `references/spec-template.md` - mandatory SPEC.md fields
 - `references/worker-contract.md` - worker standing contract (verbatim into PROMPT.txt)
 - `references/review-protocol.md` - reviewer contract
+- `references/research-task.md` - variant for tasks whose deliverable is a report
 - `references/setup.md` - environment setup and troubleshooting

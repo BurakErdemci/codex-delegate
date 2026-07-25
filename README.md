@@ -32,19 +32,39 @@ Three things, and they are the whole design:
 /plugin install codex-delegate
 ```
 
-Then, once:
+Then, once. First locate the scripts — `$CLAUDE_PLUGIN_ROOT` exists for the
+plugin loader, not in your shell, so resolve it yourself:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --init
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --smoke
+SKILL_DIR=$(find "$HOME/.claude" -maxdepth 6 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
+  | sed 's|/scripts/doctor.py||')
+echo "${SKILL_DIR:?not found — is the plugin installed?}"
+
+python3 "$SKILL_DIR/scripts/doctor.py" --init
+python3 "$SKILL_DIR/scripts/doctor.py" --smoke
 ```
+
+(No wildcards: zsh — the macOS default — aborts the whole command when a glob
+matches nothing, which is what happens whenever only one of the two install
+shapes is present.)
 
 `--init` builds an isolated Codex home for the worker and links its login to
 yours. `--smoke` runs one real turn to prove the login and protocol work — the
 only check worth trusting.
 
-**Requirements:** `codex` on PATH (0.145+ to grant MCP servers), Python 3.11+,
-and a Codex login. Verified on macOS with codex-cli 0.145.0.
+**Requirements**
+
+- `codex` on PATH, **0.145 or newer**. `dispatch.py` refuses to run below that:
+  the approval reply schema changed and guessing which one is live would silently
+  break MCP calls. `codex --version` to check; see [openai/codex](https://github.com/openai/codex)
+  to install.
+- A Codex login: `codex login` once, before `--init`.
+- **Python 3.11+.** Both scripts import `tomllib`, which arrived in 3.11. Stock
+  macOS `/usr/bin/python3` is 3.9 and will fail on import — verify with
+  `python3 -c 'import tomllib'` and use a newer interpreter if that errors.
+
+Verified on macOS with codex-cli 0.145.0.
 
 ## Use
 
@@ -54,8 +74,8 @@ approval, and the approval does not carry into the next session.
 To let the worker use one of your MCP servers:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --list-mcp
-python3 "${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/scripts/doctor.py" --add-mcp unityMCP
+python3 "$SKILL_DIR/scripts/doctor.py" --list-mcp
+python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp unityMCP
 ```
 
 `--list-mcp` blocks servers that carry credentials, point somewhere remote, or
@@ -88,14 +108,21 @@ at the same spec.
 ## Layout
 
 ```
-skills/codex-delegate/SKILL.md   the protocol Claude follows
+skills/codex-delegate/
+  SKILL.md                       the protocol Claude follows
   references/spec-template.md    mandatory spec fields
   references/worker-contract.md  the worker's standing contract
   references/review-protocol.md  the reviewer's contract
+  references/research-task.md    variant for tasks whose output is a report
   references/setup.md            setup and troubleshooting
-scripts/dispatch.py              app-server client; one worker turn
-scripts/doctor.py                setup, MCP handover, preflight checks
+  scripts/dispatch.py            app-server client; one worker turn
+  scripts/doctor.py              setup, MCP handover, preflight checks
 ```
+
+Everything lives under `skills/codex-delegate/`. Installed as a plugin the root is
+`${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/`; installed as a plain user skill it
+is `~/.claude/skills/codex-delegate/` and the `skills/codex-delegate/` prefix
+disappears.
 
 ## License
 
