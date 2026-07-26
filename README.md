@@ -1,29 +1,35 @@
 # codex-delegate
 
-A Claude Code plugin that lets Claude hand implementation work to a Codex worker
-while staying the architect and the reviewer.
+A Claude Code plugin that lets Claude hand implementation work to **parallel
+Codex worker lanes** - each in its own git worktree - while staying the
+architect and the reviewer.
 
 Claude writes the spec, decides what "correct" means, and judges the result.
-Codex writes the code, runs its own checks, and reports back in six lines. The
-worker's reasoning and file reads never enter Claude's context — only a short
-structured report and the diff hunks review actually needs.
+Each Codex worker gets a disposable worktree pinned to a known commit, works
+there, and reports back in six lines. Claude verifies the lane's footprint
+against the spec, reads the diff, and applies it to the main tree itself. The
+worker's reasoning and file reads never enter Claude's context.
 
 The point is not that Codex is smarter. It is that Claude's context is the
 scarce resource, and delegation spends someone else's.
 
 ## What makes this different from just asking another model
 
-Three things, and they are the whole design:
-
-- **The worker can use MCP.** Not just the filesystem — the Unity server, a
-  browser server, whatever the task genuinely needs. Grants are per task and
-  outward-facing servers require your explicit approval each time.
-- **Nothing is trusted.** The worker's report is a claim. Claude checks the disk,
-  re-runs the acceptance command itself, and compares the entire working tree
-  against the spec's file whitelist before believing anything.
-- **A passing test is not "done".** Anything observable gets verified by Claude
-  in the running application, through its own MCP access. Work is done because
-  someone looked, not because a command exited zero.
+- **Lanes, not a lock.** v1 serialized everything behind a global lock so two
+  writers could not collide in one tree. v2 gives every worker its own
+  worktree - nothing to collide with, so independent slices run in parallel
+  and the architect keeps working in the main tree meanwhile.
+- **The footprint is exact.** A lane starts clean at a pinned SHA, so `git
+  status` inside it IS the worker's footprint - every path is attributed, new
+  files included, no baseline diffing. Anything outside the spec's whitelist
+  stops the lane.
+- **Nothing is trusted.** The worker's report is a claim. Claude re-runs the
+  acceptance command itself, inside the lane, and reads the diff before one
+  line of it reaches the main tree. A read-only Codex reviewer passes over the
+  lane first, and its own footprint must be empty.
+- **The worker can use MCP.** Grants are per task, registered up front, and
+  outward-facing servers require your explicit approval each time - that part
+  did not loosen.
 
 ## Install
 
@@ -32,82 +38,91 @@ Three things, and they are the whole design:
 /plugin install codex-delegate
 ```
 
-Then, once. First locate the scripts — `$CLAUDE_PLUGIN_ROOT` exists for the
-plugin loader, not in your shell, so resolve it yourself:
+Then, once - resolve the script path first (`$CLAUDE_PLUGIN_ROOT` exists for
+the plugin loader, not in your shell):
 
 ```bash
-SKILL_DIR=$(find "$HOME/.claude" -maxdepth 6 -type f \
+SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 7 -type f \
   -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
   | sed 's|/scripts/doctor.py||')
-echo "${SKILL_DIR:?not found — is the plugin installed?}"
+echo "${SKILL_DIR:?not found - is the plugin installed?}"
 
 python3 "$SKILL_DIR/scripts/doctor.py" --init
 python3 "$SKILL_DIR/scripts/doctor.py" --smoke
 ```
 
-(No wildcards: zsh — the macOS default — aborts the whole command when a glob
-matches nothing, which is what happens whenever only one of the two install
-shapes is present.)
-
 `--init` builds an isolated Codex home for the worker and links its login to
-yours. `--smoke` runs one real turn to prove the login and protocol work — the
-only check worth trusting.
+yours. `--smoke` runs one real turn to prove the login, the model and the
+protocol work - the only check worth trusting.
+
+In every repo you delegate in, once:
+
+```bash
+echo '.delegate-runs/' >> .gitignore
+```
 
 **Requirements**
 
-- `codex` on PATH, **0.145 or newer**. `dispatch.py` refuses to run below that:
-  the approval reply schema changed and guessing which one is live would silently
-  break MCP calls. `codex --version` to check; see [openai/codex](https://github.com/openai/codex)
-  to install.
-- A Codex login: `codex login` once, before `--init`.
-- **Python 3.11+.** Both scripts import `tomllib`, which arrived in 3.11. Stock
-  macOS `/usr/bin/python3` is 3.9 and will fail on import — verify with
-  `python3 -c 'import tomllib'` and use a newer interpreter if that errors.
+- `codex` on PATH, **0.145 or newer** (`npm i -g @openai/codex`), and a login:
+  `codex login`. The approval reply schemas changed in 0.145; both `--check`
+  and `dispatch.py` enforce the floor rather than guessing.
+- **Python 3.11+.** Both scripts need `tomllib`; stock macOS `/usr/bin/python3`
+  is 3.9 and both scripts say so plainly instead of tracebacking.
+- macOS or Linux. Windows is untested.
 
 Verified on macOS with codex-cli 0.145.0.
 
 ## Use
 
-Invoke `/codex-delegate` in a session. Claude will not delegate without your
-approval, and the approval does not carry into the next session.
+Just ask for work. Claude routes by one test: *can a complete spec - goal,
+file whitelist, acceptance command - be written right now?* If yes and the
+work is grunt work once specified, it goes to a lane; if no, the gap itself is
+the reason Claude keeps the task. You can say "don't delegate" at any time and
+it sticks. `/codex-delegate` nudges Claude to consider delegation explicitly.
+
+What still asks for your word every time: granting an outward-facing MCP
+server, and enabling network access for a lane.
 
 To let the worker use one of your MCP servers:
 
 ```bash
 python3 "$SKILL_DIR/scripts/doctor.py" --list-mcp
 python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp unityMCP
+python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp unityMCP   # undo
 ```
 
-`--list-mcp` blocks servers that carry credentials, point somewhere remote, or
-are themselves a Codex server — that last one would let the worker spawn workers
-of its own. Registering a server does not grant it; grants happen per dispatch.
+`--list-mcp` blocks servers that carry credentials, point somewhere remote,
+look like they reach the network, or are themselves coding-agent servers
+(detected by command, not name). Registering is not granting; grants happen
+per dispatch.
 
 ## How it works
 
-`scripts/dispatch.py` drives `codex app-server` over JSON-RPC rather than calling
-`codex exec`. That is not a stylistic choice: `codex exec` has no handler for the
-approval request Codex raises on an MCP tool call, so every one of them dies as
-`user cancelled MCP tool call`. The only `exec` workaround disables the sandbox
-entirely, which would defeat the isolation the whole design rests on.
+`scripts/dispatch.py` drives `codex app-server` over JSON-RPC rather than
+calling `codex exec` - `exec` has no handler for the approval request Codex
+raises on an MCP tool call, so every one dies as `user cancelled MCP tool
+call`, and the only workaround disables the sandbox entirely.
 
-Everything else is files on disk. Each run gets a directory holding the spec, the
-prompt, a lock, the full transcript, and the worker's final report. Claude reads
-the report; the transcript is there for forensics. Disk is the durable state, so
-a run survives context compaction and can be recovered by pointing a fresh worker
-at the same spec.
+Everything else is files on disk, inside the lane: the spec, the prompt, the
+full transcript, the worker's final report, and a round ledger. Disk is the
+durable state - a lane survives context compaction and session death, and a
+fresh worker pointed at the same spec resumes the work by reading the real
+tree, not a memory of it.
 
 ## What it will not do
 
-- Touch git beyond reading it. Work stays uncommitted for you to review; there is
-  no rollback point between rounds unless you make one.
+- Let a worker run git, ever. Lanes are integrated by the architect applying
+  the diff; the work product stays uncommitted in the main tree for you.
 - Reach any remote host, code forge, or deployment target.
-- Delegate architectural decisions, vague bug hunts, or anything whose file
-  whitelist cannot be enumerated up front. If the spec cannot be written, the
-  task cannot be delegated — that filter is deliberate.
+- Delegate architectural decisions, vague bug hunts, auth/payments/schema
+  work, or anything whose file whitelist cannot be enumerated up front. If the
+  spec cannot be written, the task cannot be delegated - that filter is
+  deliberate.
 
 ## Layout
 
 ```
+commands/codex-delegate.md       /codex-delegate slash command
 skills/codex-delegate/
   SKILL.md                       the protocol Claude follows
   references/spec-template.md    mandatory spec fields
@@ -116,13 +131,8 @@ skills/codex-delegate/
   references/research-task.md    variant for tasks whose output is a report
   references/setup.md            setup and troubleshooting
   scripts/dispatch.py            app-server client; one worker turn
-  scripts/doctor.py              setup, MCP handover, preflight checks
+  scripts/doctor.py              setup, trust, MCP handover, preflight checks
 ```
-
-Everything lives under `skills/codex-delegate/`. Installed as a plugin the root is
-`${CLAUDE_PLUGIN_ROOT}/skills/codex-delegate/`; installed as a plain user skill it
-is `~/.claude/skills/codex-delegate/` and the `skills/codex-delegate/` prefix
-disappears.
 
 ## License
 

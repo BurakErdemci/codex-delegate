@@ -96,9 +96,16 @@ class AppServer:
             spawn += ["-c", kv]
         env = {**os.environ, "CODEX_HOME": str(codex_home), "NO_COLOR": "1"}
         # Never hand the worker inherited provider credentials; it authenticates
-        # through the ChatGPT login stored in codex_home.
+        # through the ChatGPT login stored in codex_home. SSH_AUTH_SOCK is on the
+        # list because an agent socket defeats the point of dropping GITHUB_*:
+        # a worker that can talk to ssh-agent can push. AWS_ is a prefix match
+        # because AWS_ACCESS_KEY_ID ends in neither _KEY nor _TOKEN.
         for key in list(env):
-            if key.endswith(("_API_KEY", "_TOKEN", "_SECRET")) or key.startswith(("GITHUB_", "GH_")):
+            if (
+                key.endswith(("_API_KEY", "_TOKEN", "_SECRET"))
+                or key.startswith(("GITHUB_", "GH_", "AWS_"))
+                or key in ("SSH_AUTH_SOCK", "GOOGLE_APPLICATION_CREDENTIALS")
+            ):
                 env.pop(key, None)
         try:
             self.proc = subprocess.Popen(
@@ -285,9 +292,10 @@ def main() -> int:
     if version < PERMISSION_SCHEMA_MIN:
         print(
             f"ERROR: codex-cli {'.'.join(map(str, version))} is older than "
-            f"{'.'.join(map(str, PERMISSION_SCHEMA_MIN))}. The MCP approval reply schema "
-            "changed in 0.145 and this script only implements the newer one. "
-            "Upgrade codex, or dispatch without --mcp.",
+            f"{'.'.join(map(str, PERMISSION_SCHEMA_MIN))}. The approval and tool-input "
+            "reply schemas changed in 0.145 and this script only implements the newer "
+            "ones - the gate applies with or without --mcp. Upgrade codex "
+            "(npm i -g @openai/codex).",
             file=sys.stderr,
         )
         return 3
@@ -333,7 +341,8 @@ def main() -> int:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
         try:
-            server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "1.0.0"}})
+            # Keep in step with .claude-plugin/plugin.json "version".
+            server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.0.0"}})
             server.send({"method": "initialized"})
 
             config: dict[str, Any] = {}

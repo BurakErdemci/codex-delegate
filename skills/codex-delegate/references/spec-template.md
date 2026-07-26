@@ -5,15 +5,16 @@ delegation-ready - do not dispatch. Write the whole file in English.
 
 ```markdown
 # TASK <task-id>
-BASE_SHA: <git rev-parse HEAD at dispatch>
+BASE_SHA: <the SHA the lane worktree is pinned to - verify with `git -C <lane> rev-parse HEAD`>
 
 ## GOAL
 <One sentence. Measurable. If it needs three sentences, split the task.>
 
 ## FILE WHITELIST
-<Every path the worker may create or modify. The architect compares the ENTIRE
- `git status --porcelain` output against this list, so anything missing here is
- flagged as a scope violation - including the worker's own changelog.>
+<Every path the worker may create or modify. The lane worktree starts clean,
+ so the ENTIRE `git status --porcelain -uall` output is the worker's footprint
+ and is compared against this list - anything missing here is flagged as a
+ scope violation, including the worker's own changelog.>
 - .delegate-runs/<task-id>/turn-*.md        # changelog - required, always
 - src/feature/...
 - (new) src/feature/NewThing.ext
@@ -82,13 +83,25 @@ looks right". Find the cheapest command that would actually break.
 The usual answer is a compile or typecheck. Engines and IDEs almost always ship
 their own compiler and runtime somewhere inside the installation; a small script
 that drives it directly gives you a real pass/fail without opening the editor.
-Write that script yourself, keep it in the repo, and point ACCEPTANCE at it.
+Write that script yourself - INTO THE LANE - and point ACCEPTANCE at it. Then
+add it to the whitelist marked as yours:
+
+```
+- (architect) tools/acceptance.sh   # written by the architect, not the worker
+```
+
+Without the mark, your own file surfaces in the lane footprint as an
+unattributable path and you will report it as the worker's scope violation.
 
 **Then verify the check can both fail AND pass.** Both directions, once, before
 you dispatch. It costs two minutes and it is the highest-yield step in the whole
 protocol.
 
-- **Can it fail?** Introduce a deliberate error, confirm non-zero exit, revert. A
+- **Can it fail?** Introduce a deliberate error, confirm non-zero exit, revert.
+  Do this INSIDE THE LANE, never in the main tree: the lane is disposable and
+  `git -C <lane> checkout -- <file>` restores it perfectly, while the main tree
+  is dirty by design and has no rollback point - an injected error that survives
+  a session drop there is found days later, while chasing an unrelated bug. A
   command that passes on everything is worse than none: it manufactures false
   confidence in the worker's self-loop and in your own audit.
 - **Can it pass?** Build a minimal correct fixture, confirm exit zero, delete the

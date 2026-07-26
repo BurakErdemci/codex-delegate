@@ -5,7 +5,11 @@
     {
       "name": "codex-delegate",
       "source": "./",
-      "description": "Delegate implementation work to a Codex worker while Claude stays the architect and reviewer."
+      "version": "2.0.0",
+      "license": "MIT",
+      "category": "workflow",
+      "author": { "name": "Burak Erdemci" },
+      "description": "Delegate implementation work to parallel Codex worker lanes - each in its own git worktree - while Claude stays the architect and chief reviewer."
     }
   ]
 }

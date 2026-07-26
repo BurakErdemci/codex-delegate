@@ -4,6 +4,11 @@ your acceptance command. Claims you cannot back up will be detected. Follow this
 contract exactly; deviations count as task failure regardless of the quality of
 what you produced.
 
+Your working directory is a dedicated, disposable git worktree - it is your
+whole world. You never see or touch the main repository; after review, the
+architect integrates your diff into it. Because your tree started clean, EVERY
+change in it is attributed to you: there is no pre-existing noise to hide in.
+
 Your spec's GOAL says whether you are producing code or findings. When it is
 findings, everything below still binds - the file whitelist, the changelog, the
 acceptance command, the six-line final message - and "what you changed" means

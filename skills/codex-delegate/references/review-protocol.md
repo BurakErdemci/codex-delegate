@@ -12,7 +12,7 @@ git diff                   # tracked changes only
 Then read every untracked (`??`) file in full. New files never appear in
 `git diff`, so a diff-only review of a task that creates files reviews nothing.
 
-Read the SPEC.md you were pointed at. It is the contract you are judging against.
+Read the SPEC.md named in your instruction line - the one line after this contract. It is the contract you are judging against.
 
 ## What to check, in priority order
 

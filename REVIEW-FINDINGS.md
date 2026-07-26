@@ -7,6 +7,24 @@ the open-work list.
 **Roughly a third are fixed in `a21b1aa`.** Read this file as "what the audit
 found", not as "what is currently broken".
 
+**v2 (lane model) update:** the worktree-per-worker redesign dissolved or fixed
+most of what remained. Dissolved by construction: the global lock and its stale
+states (protocol #3, #8), BASELINE attribution and its ordering traps (#5, #6,
+#12, #13, #14 - a lane starts clean, so `git status -uall` IS the footprint).
+Fixed in v2: turn numbering in the instruction line (#1), ROUNDS.txt on-disk
+round bookkeeping (#7), MCP registration as preflight (#10), folder trust via
+`doctor.py --trust/--untrust` (#11), archive-before-delete closeout (#18),
+copy-based falsification in the lane (#16), smoke via mkdtemp (#17), doctor:
+version floor + config parse + honest login states (#5, #6, #7, #15 install),
+CODEX_HOME honoured (#17 install), plugin MCP discovery (#10 install),
+command-based recursion check + networking hints + honest labels (#4, #11
+install), `--remove-mcp` + chmod 600 (#13 install), python version gate (#2
+install), `commands/` slash entry (#9 install), manifest metadata (#19),
+single install shape - plugin only (#20 install, #1 install), argparse help +
+rc=max (#21). Still open, deliberately: RAW_OUTPUT.log rotation, transcript
+truncation limits, Windows support, `--network` shorthand (the `-c` gate
+shipped instead; the denylist is in dispatch.py).
+
 ## Addressed in a21b1aa
 
 - All three protocol blockers: turn numbering, `FINAL.txt` on the error path,

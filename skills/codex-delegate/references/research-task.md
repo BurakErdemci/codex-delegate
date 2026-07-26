@@ -29,7 +29,7 @@ Replace it. Record the dispatch time, then look for anything modified inside tha
 window outside the run directory:
 
 ```bash
-# preflight, before `touch IN_FLIGHT`
+# preflight, right before dispatch
 date +%s > .delegate-runs/<task-id>/DISPATCHED_AT
 
 # closeout
@@ -94,7 +94,6 @@ Closeout becomes:
    close it". Deleting them means whoever picks up those questions writes them
    again from scratch.
 3. **Delete the large one-off captures** once the report has distilled them.
-4. Then remove `IN_FLIGHT`.
 
 ## 4. Decide network before dispatch, and say what to do if it is denied
 
@@ -137,9 +136,16 @@ If prior art exists, name it and say how to treat it: *"read it for what it
 learned; verify its claims rather than trusting them"*. Stale prior art is
 common, and a worker told to verify will catch it.
 
+## Where research tasks run
+
+Usually NOT in a lane. A research worker produces no product code, so a
+worktree protects nothing; give it a scratch directory outside any repository
+(and `doctor.py --trust` it), or dispatch `--sandbox read-only` against the
+real tree when the task is "read this codebase". The mtime window above is the
+footprint check either way.
+
 ## What does not change
 
-- The activation gate, the `IN_FLIGHT` lock, one delegation at a time.
 - FILE WHITELIST and DO-NOT-TOUCH as absolute boundaries.
 - The changelog as a hard deliverable and the six-line final message.
 - **Verify before trusting.** Run the acceptance command yourself. The worker

@@ -1,7 +1,10 @@
 {
   "name": "codex-delegate",
-  "description": "Delegate implementation work to a Codex worker while Claude stays the architect and reviewer.",
-  "version": "1.0.0",
-  "author": { "name": "Burak Erdemci" },
-  "keywords": ["codex", "delegation", "subagent", "mcp", "review"]
+  "description": "Delegate implementation work to parallel Codex worker lanes - each in its own git worktree - while Claude stays the architect and chief reviewer.",
+  "version": "2.0.0",
+  "author": { "name": "Burak Erdemci", "url": "https://github.com/BurakErdemci" },
+  "homepage": "https://github.com/BurakErdemci/codex-delegate",
+  "repository": "https://github.com/BurakErdemci/codex-delegate",
+  "license": "MIT",
+  "keywords": ["codex", "delegation", "worktree", "parallel", "subagent", "mcp", "review"]
 }
