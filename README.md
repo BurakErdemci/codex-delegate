@@ -1,8 +1,14 @@
 # codex-delegate
 
-A Claude Code plugin that lets Claude hand implementation work to **parallel
-Codex worker lanes** - each in its own git worktree - while staying the
-architect and the reviewer.
+A Claude Code plugin with two halves, both built on the same idea: **Codex does
+the labour, Claude keeps the judgement.**
+
+- **`codex-delegate`** hands implementation work to **parallel Codex worker
+  lanes**, each in its own git worktree, while Claude stays the architect.
+- **`codex-audit`** turns that machinery around: a Codex **red team** attacks
+  the code Claude wrote, and Claude verifies every finding before acting on it.
+
+## codex-delegate - parallel worker lanes
 
 Claude writes the spec, decides what "correct" means, and judges the result.
 Each Codex worker gets a disposable worktree pinned to a known commit, works
@@ -83,6 +89,10 @@ it sticks. `/codex-delegate` nudges Claude to consider delegation explicitly.
 What still asks for your word every time: granting an outward-facing MCP
 server, and enabling network access for a lane.
 
+To audit: say so when a piece of work is done - "audit today's work" - or
+`/codex-audit`. There is no automatic trigger, deliberately: an audit spends
+real time and tokens. A comprehensive refactor has to be asked for by name.
+
 To let the worker use one of your MCP servers:
 
 ```bash
@@ -95,6 +105,41 @@ python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp unityMCP   # undo
 look like they reach the network, or are themselves coding-agent servers
 (detected by command, not name). Registering is not granting; grants happen
 per dispatch.
+
+## codex-audit - outside eyes on your own code
+
+Claude wrote the codebase, so Claude is the wrong auditor for it. Ask it to
+audit the day's work and it briefs a Codex red team from `git diff` (not from
+its memory of the session - a narrative brief audits your intentions, the diff
+audits your code), classifies the threat surface, and fans lenses out to Codex
+subagents inside a disposable worktree where the sandbox holds but nothing is
+off-limits.
+
+Then the part that makes it usable: **a finding without a runnable proof is a
+hypothesis, not a vulnerability.** Every finding ships a `probes/*.sh` that is
+red now and green once fixed. Claude runs each proof first - findings that do
+not reproduce die for free, before any agent looks at them. Survivors get
+re-anchored in the live tree, judged for reachability, and high-severity ones
+get an agent whose job is to *refute* them. Claude fixes what is left, and the
+proof flipping green is what says it is fixed.
+
+It also carries a **hygiene lens** for the residue machine-written code leaves:
+escape-hatch types, dead code, pass-through wrappers, error handlers that
+swallow the error, tests that assert nothing. Counters run before opinions,
+because `any` count can be wrong and "this feels cleaner" cannot. Comments are
+audited by **necessity, in both directions** - there is no target density, so
+noise is a finding and so is a non-obvious decision left unexplained.
+
+A second mode does a comprehensive refactor, and only on an explicit request:
+deterministic inventory, Claude edits in batches, the full gate green after
+each. A refactor's promise is "behaviour unchanged" and the gate is the only
+thing that can support it.
+
+Findings accumulate in an append-only ledger, which buys the one honest form of
+learning: a finding class recurring across three audits is a pattern worth a
+rule, and the evidence is those three findings - not a model's claim that it
+learned something. The ledger is also the scalar the skill is judged by. If
+confirmed-over-total collapses, it is producing noise and should be narrowed.
 
 ## How it works
 
@@ -122,7 +167,12 @@ tree, not a memory of it.
 ## Layout
 
 ```
-commands/codex-delegate.md       /codex-delegate slash command
+commands/                        /codex-delegate and /codex-audit
+skills/codex-audit/
+  SKILL.md                       the audit protocol: modes, pipeline, decisions
+  references/lenses.md           threat model -> lens sets, and each lens's blind spots
+  references/hygiene.md          vibe-code checks; counters and judgement separated
+  references/finding-contract.md the findings format, verbatim for the worker brief
 skills/codex-delegate/
   SKILL.md                       the protocol Claude follows
   references/spec-template.md    mandatory spec fields

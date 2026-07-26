@@ -1,10 +1,22 @@
 {
   "name": "codex-delegate",
-  "description": "Delegate implementation work to parallel Codex worker lanes - each in its own git worktree - while Claude stays the architect and chief reviewer.",
-  "version": "2.0.0",
-  "author": { "name": "Burak Erdemci", "url": "https://github.com/BurakErdemci" },
+  "description": "Delegate implementation work to parallel Codex worker lanes, and audit your own code with an outside Codex red team that Claude verifies.",
+  "version": "2.1.0",
+  "author": {
+    "name": "Burak Erdemci",
+    "url": "https://github.com/BurakErdemci"
+  },
   "homepage": "https://github.com/BurakErdemci/codex-delegate",
   "repository": "https://github.com/BurakErdemci/codex-delegate",
   "license": "MIT",
-  "keywords": ["codex", "delegation", "worktree", "parallel", "subagent", "mcp", "review"]
+  "keywords": [
+    "codex",
+    "delegation",
+    "worktree",
+    "parallel",
+    "audit",
+    "red-team",
+    "security",
+    "review"
+  ]
 }

@@ -342,7 +342,7 @@ def main() -> int:
             return 1
         try:
             # Keep in step with .claude-plugin/plugin.json "version".
-            server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.0.0"}})
+            server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.1.0"}})
             server.send({"method": "initialized"})
 
             config: dict[str, Any] = {}

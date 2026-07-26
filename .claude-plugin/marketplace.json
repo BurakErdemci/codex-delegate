@@ -1,15 +1,19 @@
 {
   "name": "codex-delegate",
-  "owner": { "name": "Burak Erdemci" },
+  "owner": {
+    "name": "Burak Erdemci"
+  },
   "plugins": [
     {
       "name": "codex-delegate",
       "source": "./",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "license": "MIT",
       "category": "workflow",
-      "author": { "name": "Burak Erdemci" },
-      "description": "Delegate implementation work to parallel Codex worker lanes - each in its own git worktree - while Claude stays the architect and chief reviewer."
+      "author": {
+        "name": "Burak Erdemci"
+      },
+      "description": "Delegate implementation work to parallel Codex worker lanes, and audit your own code with an outside Codex red team that Claude verifies."
     }
   ]
 }
