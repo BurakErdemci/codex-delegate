@@ -36,6 +36,14 @@ what it looked for. A missing file is an incomplete turn, not a clean lens.
 the current code, and be something that would exit zero once the flaw is fixed.
 Red now, green after. That is the whole test.
 
+**And state what the proof covers.** A probe that exercises one call path can
+flip green while the class in `class:` stays alive through every other path.
+So answer it explicitly: does the proof verify the whole class, or a single
+path to it? Single path -> `confidence: partially-verified`, and say in the
+finding which paths or surfaces stayed out of the probe's reach. Measured why:
+a fixed finding's probe went green while the same capability stayed reachable
+through a second entry point the probe never touched.
+
 If you cannot build such a proof, you have two honest options, and both are
 acceptable results:
 
@@ -95,6 +103,15 @@ cost:       one line - who pays for this, and when
 A hygiene finding with no stated cost is a style preference. Drop it rather than
 report it. "Harder to read" is not a cost; "the next reader cannot tell which of
 these two implementations is authoritative" is.
+
+## Out-of-scope findings
+
+If you notice something real outside your lens, do not chase it and do not
+drop it. Add it at the end of your findings file under a `## Out of scope`
+heading - one short entry each: where, what, one line on why it looks real.
+No probe required; it enters the next brief's scope instead of dying in your
+context. Measured: two narrow-brief agents each surfaced one out-of-scope
+finding spontaneously, and one of those was the most serious flaw of the run.
 
 ## Do not report
 

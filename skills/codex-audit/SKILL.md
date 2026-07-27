@@ -142,6 +142,13 @@ So the routing is conditional on lens count, never on enthusiasm:
   parallel and already isolated; a wide subagent tree buys nothing but a
   coordinator that fails wide. Claude collects findings files across lanes.
 
+Cross-executor corroboration, one run: the same audit gave a wide lane seven
+lenses and two other agents one narrow task each. The wide lane delivered 1 of
+7; the narrow agents delivered 2 of 2, and both spontaneously reported a real
+out-of-scope finding. Model and structure varied together, so this ranks no
+executor - what it corroborates is that the narrow single-lens brief is the
+deliverable-producing shape. The untested cell is a narrow-brief Codex lane.
+
 ### The rule that makes this work: findings go to disk
 
 **Never ask a parent to aggregate its subagents' findings into its final
@@ -213,6 +220,23 @@ before an agent is involved:
 
 Findings that survive all four are real. Everything else is logged as rejected
 **with a one-line reason**, so it does not come back next audit.
+
+### Closing a finding - green proves only what the probe covers
+
+A fix is proven by the proof flipping red -> green, but that green is exactly
+as wide as the probe. Before closing a confirmed finding:
+
+1. **Read the proof's scope label.** `partially-verified` means the probe
+   exercised one path; the fix may have closed one door on a room with two.
+2. **Ask §2's question once more, scoped to this finding:** is the same
+   capability reachable through another entry point? Enumerate candidates from
+   the threat model. If any exist, dispatch one narrow re-hunt brief on that
+   class - not a full re-audit.
+
+Measured miss that put this step here: a finding was fixed, its probe went
+green, and the same capability stayed reachable through a second surface the
+probe never touched. The proof-flip criterion is per-path by construction;
+closure has to be per-class.
 
 ## 5. Hygiene - the vibe-code lens
 

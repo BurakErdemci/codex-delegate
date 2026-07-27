@@ -981,3 +981,27 @@ Doğrulama durumu: düzeltmeler bu koşunun ölçülmüş arızalarına biçimce
 (koşullu kural / tek format / doldurulacak iskelet), ama henüz yeni bir saha
 koşusuyla SINANMADI. Bir sonraki audit koşusu bu değişikliklerin GREEN testidir;
 ledger'daki confirmed/total oranı ve changelog'un dolup dolmadığı izlenecek.
+
+---
+
+# Saha koşusu geri bildirimi #2 — 27 Tem 2026 (codex-audit, aynı gün ikinci tur)
+
+1. **Sahte-yeşil kanıt.** Tek çağrı yolunu sınayan probe, sınıf yaşarken yeşile
+   dönebiliyor. Çözüm: finding-contract.md'ye kapsam beyanı — proof sınıfın
+   tamamını mı tek yolu mu doğruluyor; tek yol ise `partially-verified` +
+   kapsam dışı kalan yüzeyler yazılır.
+
+2. **Düzeltme sonrası yeniden av yok.** Ölçülen kaçak: bulgu düzeltildi, probe
+   yeşile döndü, aynı yetenek ikinci bir giriş noktasından erişilebilir kaldı
+   (/mcp). Çözüm: SKILL.md §4'e "Closing a finding" adımı — kapanıştan önce
+   tehdit modeli sorusu o bulguya daraltılmış olarak tekrar sorulur; aday
+   varsa sınıf-ölçekli tek dar av, tam yeniden audit değil.
+
+3. **Dar brief karşılaştırması (karıştırılmış veri).** Geniş Codex lane'i
+   (7 lens) 1/7 teslim etti; tek-dar-görevli iki Claude subagent'ı 2/2 teslim
+   etti ve ikisi de kapsam dışı gerçek bir bulguyu kendiliğinden bildirdi.
+   Model VE yapı birlikte değişti — yürütücü sıralaması bu veriden çıkmaz;
+   dar brief'in teslimat üreten biçim olduğunu çapraz doğrular. Sınanmamış
+   hücre: dar brief'li Codex lane'i. Skill'e giren: §3'e bu doğrulama notu +
+   finding-contract.md'ye out-of-scope yuvası (peşine düşme, ama yaz —
+   bu kanal koşunun en ciddi açığını taşıdı).
