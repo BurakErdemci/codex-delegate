@@ -147,7 +147,8 @@ footprint check either way.
 ## What does not change
 
 - FILE WHITELIST and DO-NOT-TOUCH as absolute boundaries.
-- The changelog as a hard deliverable and the six-line final message.
+- The changelog (architect seeds the skeleton, worker fills it) and the
+  six-line final message.
 - **Verify before trusting.** Run the acceptance command yourself. The worker
   reporting `ACCEPTANCE: pass` is a claim, not a result.
 - MCP grant rules, including per-task approval for outward-facing servers.

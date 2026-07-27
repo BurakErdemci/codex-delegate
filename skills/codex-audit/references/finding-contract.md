@@ -12,15 +12,17 @@ writes and the format Claude verifies against.
 .delegate-runs/<task-id>/probes/<name>.sh        one runnable proof per finding
 ```
 
-Your final message is a **manifest only** - the list of findings files you
-created and the number of findings in each. Nothing else.
+Your final message follows the worker contract exactly: **six lines, nothing
+else.** Findings never appear in it. The changelog's `files:` section lists
+every findings file you wrote - that list is the only manifest there is.
 
-The reason is measured, not stylistic: a parent agent asked to collect three
+The reason is measured, not stylistic. A parent agent asked to collect three
 subagents' results into its final message returned one of them, and when told
 explicitly to wait for all three and emit seven lines it emitted nine
-characters. Both times the turn reported success. The filesystem does not have
-that failure mode - a file either exists and is non-empty or it does not, and
-that is checkable.
+characters. Both times the turn reported success. A worker handed a second,
+competing final-message format followed neither and wrote prose - prose that
+contained an invented causal claim. The filesystem has neither failure mode:
+a file either exists and is non-empty or it does not, and that is checkable.
 
 **Every lens named in your brief must end with a non-empty findings file.** A
 lens that found nothing writes the file with `findings: 0` and one line saying

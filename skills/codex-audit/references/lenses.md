@@ -1,8 +1,10 @@
 # Lens catalogue
 
-One lens = one subagent = one findings file. Pick lenses from the threat-model
-answers in SKILL.md §2; do not run the whole catalogue by reflex. Name the ones
-you skipped in the report - an unmentioned lens reads as a clean lens.
+One lens = one findings file, always. Whether lenses share one lane or each get
+their own is SKILL.md §3's width rule - more than three lenses never share one
+worker. Pick lenses from the threat-model answers in SKILL.md §2; do not run
+the whole catalogue by reflex. Name the ones you skipped in the report - an
+unmentioned lens reads as a clean lens.
 
 Each lens below states **what it looks for** and **what it is blind to**, because
 a lens set chosen without knowing the blind spots produces false confidence.

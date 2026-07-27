@@ -172,12 +172,28 @@ Build `PROMPT.txt`: the full contents of `references/worker-contract.md`,
 followed by one line:
 
 ```
-Read .delegate-runs/<task-id>/SPEC.md and execute it. Task dir: .delegate-runs/<task-id>/ - this is turn <N>; write your changelog to .delegate-runs/<task-id>/turn-<N>.md
+Read .delegate-runs/<task-id>/SPEC.md and execute it. Task dir: .delegate-runs/<task-id>/ - this is turn <N>; your changelog skeleton is at .delegate-runs/<task-id>/turn-<N>.md - fill it in.
 ```
 
+**Seed the changelog skeleton before every dispatch** - worker, review, retry
+and recovery alike:
+
+```bash
+printf '# RUN %s / turn <N>\nstatus: SKELETON - worker has not filled this in\n' \
+  "$TASK_ID" > "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md"
+```
+
+Why a pre-seeded file instead of an instruction: "write turn-N.md, a hard
+deliverable, never optional" was measured not to bind - two field turns in a
+row produced no changelog, the second despite extra emphasis in the prompt.
+A file the worker must overwrite turns the deliverable from something to
+remember into something already in front of it, and gives §6 a mechanical
+check: a surviving skeleton marker fails the turn.
+
 **You own the turn counter.** Every dispatch is a cold start - the worker has
-no memory of earlier turns and cannot know N. Before each retry, rewrite that
-line with the new N and confirm `turn-<N-1>.md` is still on disk.
+no memory of earlier turns and cannot know N. Before each retry, rewrite the
+instruction line with the new N, seed the new turn's skeleton, and confirm
+`turn-<N-1>.md` is still on disk.
 
 ## 5. Dispatch
 
@@ -224,7 +240,9 @@ The worker's report is a claim. The lane started clean at BASE_SHA, so the
 checks are direct - no baseline diffing, no attribution puzzles:
 
 ```bash
-test -f "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md"   # missing -> turn UNTRUSTED
+test -f "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md" \
+  && ! grep -q 'SKELETON' "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md" \
+  || echo "BLOCK: changelog missing or unfilled -> turn UNTRUSTED"
 git -C "$LANE" rev-parse HEAD                          # must still equal BASE_SHA
 git -C "$LANE" status --porcelain -uall -- . ':(exclude).delegate-runs'
 ```
@@ -339,7 +357,9 @@ worktree only after the user confirms.
 One path. A fresh dispatch into the same lane, same PROMPT.txt, but this
 instruction line:
 
-`Read .delegate-runs/<task-id>/SPEC.md. Assess the current working tree against it and complete what is missing. This is turn <N>; write your changelog to .delegate-runs/<task-id>/turn-<N>.md`
+`Read .delegate-runs/<task-id>/SPEC.md. Assess the current working tree against it and complete what is missing. This is turn <N>; your changelog skeleton is at .delegate-runs/<task-id>/turn-<N>.md - fill it in.`
+
+Seed the skeleton first, as always (§4).
 
 The conversation is disposable; the lane and its SPEC.md are the state. A fresh
 worker reading the real tree beats a resumed one trusting its memory. Lanes

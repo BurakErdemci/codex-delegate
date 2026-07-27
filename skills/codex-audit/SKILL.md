@@ -119,30 +119,55 @@ review lane:
   the findings files and the probe scripts. So there is no FILE WHITELIST to
   police and no scope-violation check - the lane may do anything to itself.
 
+### Width is what breaks - route by lens count
+
 Codex has real subagents (`spawn_agent`, `wait_agent`, `list_agents` - runtime
-tools, absent from `--help`). Tell the worker to use them; a comprehensive audit
-is exactly the "one task, too much reading" case they exist for.
+tools, absent from `--help`), but their coordination degrades with width, and
+that is measured twice over:
 
-### The rule that makes this work: subagents write to disk
+- **Probe runs (3 subagents):** spawning worked, aggregation did not - told to
+  wait for all three and emit seven lines, the parent emitted nine characters.
+  Every time `rc=0`, `turn/completed`, `FINAL.txt` populated.
+- **Field audit (7 subagents):** coordination itself broke - the parent dropped
+  6 of the 7 across two turns. Disk-written findings survive an aggregation
+  failure; nothing survives the subagent never running.
 
-**Never ask the parent to aggregate its subagents' findings into its final
-message.** Measured across three probes: the fan-out happens reliably, the
-aggregation does not. Three subagents spawned, one value returned. Told
-explicitly to wait for all three and emit seven lines, it emitted nine
-characters. Every time `rc=0`, `turn/completed`, `FINAL.txt` populated - three
-good signals over a one-seventh delivery.
+So the routing is conditional on lens count, never on enthusiasm:
 
-So the filesystem is the aggregation layer:
+- **3 lenses or fewer** -> one hunter lane; the worker may spawn one subagent
+  per lens.
+- **More than 3 lenses** -> **one lens = one lane.** Parallel disposable
+  worktrees per `codex-delegate` §2-§4, each dispatched with a single-lens
+  brief, each writing findings into its own task dir. Lanes are already
+  parallel and already isolated; a wide subagent tree buys nothing but a
+  coordinator that fails wide. Claude collects findings files across lanes.
 
-- Each subagent writes its own `.delegate-runs/<task>/findings/<lens>.md`.
-- The parent's final message is a **manifest** - which files it created, nothing
-  more.
-- Claude reads the files. The parent's context never holds the findings, which
+### The rule that makes this work: findings go to disk
+
+**Never ask a parent to aggregate its subagents' findings into its final
+message** - that is the aggregation failure measured above. The filesystem is
+the aggregation layer:
+
+- Each subagent (or single-lens lane) writes its own
+  `.delegate-runs/<task>/findings/<lens>.md`.
+- The worker's final message stays the worker contract's **six lines - there is
+  no separate manifest format.** The changelog's `files:` section lists every
+  findings file written; that list is the manifest. Why no second format, also
+  measured: a field worker handed two competing final-message rules followed
+  neither, wrote prose on both turns, and turn 1's prose contained an invented
+  causal claim about who had deleted the test fixtures. Prose is where
+  confabulation lives; six lines leave it nowhere to sit.
+- Claude reads the files. No parent's context ever holds the findings, which
   also serves the reason for fanning out in the first place.
 - **Acceptance is mechanical:** every lens named in the brief has a non-empty
-  findings file. Missing or empty -> the turn is incomplete, retry that lens. A
-  manifest listing a file that is not on disk is the same failure the delegate
-  protocol already guards against, and the same check catches it.
+  findings file on disk. Missing or empty -> the turn is incomplete, retry that
+  lens. The check reads the disk, never the report.
+- **When clearing stale findings before a retry, use
+  `find "$LANE/.delegate-runs/$TASK_ID/findings" -name '<lens>.md' -delete`,
+  never a shell glob.** zsh (the macOS default) aborts the entire command when
+  a glob matches nothing - measured three times in one field audit, and the
+  first abort contaminated turn 1. Same trap `codex-delegate` §0.1 documents;
+  it bites hardest here because the audit flow cleans `findings/` constantly.
 
 This is `research-task.md`'s evidence-index rule applied to a fan-out. Nothing
 new is invented; the mechanism already exists in the sibling skill.

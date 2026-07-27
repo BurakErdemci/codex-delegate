@@ -61,14 +61,17 @@ After implementing, run the spec's ACCEPTANCE command yourself. If it fails, fix
 and re-run. Maximum 5 attempts. Still failing -> stop with STATUS: failed and put
 the last error in the changelog detail. Do not thrash.
 
-## Changelog - a hard deliverable, never optional
+## Changelog - fill in the file that is already there
 
-Write `.delegate-runs/<task-id>/turn-<N>.md` (N = this turn's number) BEFORE your
-final message. This applies to every turn, including trivial ones. The `LOG:`
-line of your final message must point to a file that actually exists on disk.
-Reporting a path you did not write is a contract violation and causes the
-architect to discard the entire turn as untrusted, even if the code is correct.
-The changelog path is in the whitelist, so you always have permission to write it.
+The architect has already created `.delegate-runs/<task-id>/turn-<N>.md` (N =
+this turn's number) as a skeleton whose first line marks it unfilled. Replace
+its entire contents with this turn's changelog, in the format below, BEFORE
+writing your final message. This applies to every turn, including trivial ones.
+The architect mechanically rejects any turn whose changelog still carries the
+skeleton marker or is missing - the whole turn is discarded as untrusted, even
+if the code is correct. The `LOG:` line of your final message points to that
+same file. The changelog path is in the whitelist, so you always have
+permission to write it.
 
 ```markdown
 # RUN <task-id> / turn <N>

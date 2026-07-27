@@ -939,3 +939,45 @@ patlatabilir, once bosta denenmeli.
 - --effort varsayilani 'high' kosulsuz enjekte ediliyor (satir 178 + 76-77). Bu, ~/.codex-worker/config.toml'daki model_reasoning_effort'u her zaman eziyor ve secilen modelin 'high' efor destekledigi varsayiliyor (model kataloglarinda supportedReasoningEfforts alani var, her model her eforu desteklemiyor). En azindan default=None olup config.toml'a birakilmali.
 - approvalPolicy='on-request' (satir 231) + tum commandExecution/fileChange isteklerinin otomatik REDDI (satir 137-142) tasarim geregi dogru, ama isci ayni komutu tekrar tekrar deneyip turu bos yere tuketebilir; RAW_OUTPUT.log'da [decline] birikir ama isciye 'bu bir politika, tekrar deneme' sinyali gitmiyor. requestUserInput cevabi (satir 143-144) 'Proceed using your best judgment' diyor - reddedilen bir eylemin ardindan bu mesaj isciyi ayni duvara tekrar surer.
 - final_text yalnizca item/completed + type=='agentMessage' olaylarindan toplaniyor (satir 150-153) ve her seferinde UZERINE yaziliyor. Isci raporu yazip ardindan kisa bir kapanis mesaji ('Done.') uretirse FINAL.txt'ye kisa olan gecer, asil rapor RAW_OUTPUT.log icinde 4000 karaktere kesilmis halde kalir. En azindan tum agentMessage'lari biriktirip sonuncusunu degil hepsini (veya en uzununu) yazma secenegi dusunulmeli.
+
+---
+
+# Saha koşusu geri bildirimi — 27 Tem 2026 (codex-audit, gerçek codebase)
+
+Kullanıcı codex-audit'i kendi projesinde uçtan uca koşturdu. Beş bulgu, beşi de
+aynı gün skill metnine işlendi. Ölçümler bulgu satırlarında; çözümler dosya
+referanslarıyla.
+
+1. **Kanıt sözleşmesi çalışıyor (değişiklik yok).** Üç makul görünen iddia
+   proof koşulunca öldü; bir gerçek bulgu (kontrol düzlemi sınıfı) hiçbir
+   lens raporunda yokken çift yönlü acceptance sınamasıyla yakalandı.
+   "Runnable proof yoksa hipotezdir" kuralı raporun olduğu gibi kabulünü önledi.
+
+2. **Genişlik: spawn da bozuluyor.** Ebeveyn 7 subagent'ın 6'sını iki turda
+   düşürdü. Önceki ölçüm (3 subagent, aggregation bozuk) diske-yazma kuralıyla
+   çözülmüştü; bu koşu koordinasyonun kendisinin de genişlikle bozulduğunu
+   gösterdi. Çözüm: SKILL.md §3'e lens sayısına koşullu yönlendirme —
+   ≤3 lens tek lane, >3 lens'te bir lens = bir lane (paralel worktree'ler).
+
+3. **Final-mesaj çakışması.** worker-contract "altı satır", codex-audit §3
+   "manifest" diyordu; worker ikisini de yapmayıp iki turda düzyazı yazdı ve
+   turn 1'de uydurma nedensellik üretti ("subagent'lar fixture'ları sildi" —
+   silen kullanıcıydı). Çözüm: manifest formatı silindi; final mesaj her yerde
+   altı satır, manifest'in evi changelog'un `files:` bölümü
+   (finding-contract.md + SKILL.md §3 birlikte güncellendi).
+
+4. **Changelog düzyazı vurgusuyla bağlamıyor.** "Hard deliverable, asla
+   opsiyonel değil" iki turda da işlemedi — ikincisinde prompt'ta ek vurguya
+   rağmen. İki veri noktası. Çözüm yapısal: mimar her dispatch'ten önce
+   turn-N.md iskeletini yazar (codex-delegate §4), worker doldurur
+   (worker-contract), §6'da SKELETON işareti mekanik kontrol edilir.
+   Hatırlatma yerine doldurulacak slot.
+
+5. **zsh glob-abort audit akışında tekrarladı.** codex-delegate §0.1'de yazılı
+   tuzak audit'te tekrar edilmemişti; kullanıcı üç kez düştü, ilki turn 1'in
+   findings'ini kirletti. Çözüm: codex-audit §3'e `find ... -delete` kuralı.
+
+Doğrulama durumu: düzeltmeler bu koşunun ölçülmüş arızalarına biçimce uygun
+(koşullu kural / tek format / doldurulacak iskelet), ama henüz yeni bir saha
+koşusuyla SINANMADI. Bir sonraki audit koşusu bu değişikliklerin GREEN testidir;
+ledger'daki confirmed/total oranı ve changelog'un dolup dolmadığı izlenecek.
