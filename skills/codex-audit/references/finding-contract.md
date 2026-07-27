@@ -36,6 +36,21 @@ what it looked for. A missing file is an incomplete turn, not a clean lens.
 the current code, and be something that would exit zero once the flaw is fixed.
 Red now, green after. That is the whole test.
 
+**Three exit codes, not two.** A probe is a measuring instrument and it must be
+able to say that it broke:
+
+| exit | meaning |
+|---|---|
+| `1` | the flaw reproduces - the finding is live |
+| `0` | the flaw does not reproduce - fixed, or never real |
+| `2` | **probe invalid** - it can no longer test what it was written to test |
+
+Print one line to stderr before exiting `2`, saying what stopped applying
+(symbol renamed, file moved, entry point gone). A probe that silently keeps
+passing after a refactor moved its target is a green light with nothing behind
+it, and `2` is what prevents that. Measured: a refactor pushed a probe to
+`rc=2` and the three-state design is what kept it from reading as fixed.
+
 **And state what the proof covers.** A probe that exercises one call path can
 flip green while the class in `class:` stays alive through every other path.
 So answer it explicitly: does the proof verify the whole class, or a single
@@ -104,14 +119,34 @@ A hygiene finding with no stated cost is a style preference. Drop it rather than
 report it. "Harder to read" is not a cost; "the next reader cannot tell which of
 these two implementations is authoritative" is.
 
-## Out-of-scope findings
+## `## Coverage` - a required section, not an optional one
 
-If you notice something real outside your lens, do not chase it and do not
-drop it. Add it at the end of your findings file under a `## Out of scope`
-heading - one short entry each: where, what, one line on why it looks real.
-No probe required; it enters the next brief's scope instead of dying in your
-context. Measured: two narrow-brief agents each surfaced one out-of-scope
-finding spontaneously, and one of those was the most serious flaw of the run.
+Every findings file ends with a `## Coverage` section. It is checked
+mechanically like the rest of the file: missing section = incomplete turn.
+
+```markdown
+## Coverage
+
+surfaces examined: <list, or a table - whatever shape fits>
+not examined:      <what you did not reach, and why> | none
+out of scope:      <real things you noticed outside this lens> | none
+```
+
+**`out of scope` is where a real thing you noticed outside your lens goes.**
+Do not chase it, do not drop it: where, what, one line on why it looks real.
+No probe required - it enters the next brief's scope instead of dying in your
+context.
+
+Two measurements shaped this section. Narrow-brief agents surfaced serious
+out-of-scope findings spontaneously - one was the worst flaw of its run. But
+when the same thing was offered as a standalone optional heading it was used
+**0 times out of 3**, while the same workers wrote coverage tables and review
+sections of their own accord. The information was being produced; the heading
+was not being reached for. So the section is now required, it is named for
+what workers already write, and the out-of-scope entry lives inside it.
+
+A table is a fine shape for `surfaces examined`. Do not flatten one into
+prose to satisfy the format.
 
 ## Do not report
 

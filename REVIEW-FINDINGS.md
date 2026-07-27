@@ -1005,3 +1005,49 @@ ledger'daki confirmed/total oranı ve changelog'un dolup dolmadığı izlenecek.
    hücre: dar brief'li Codex lane'i. Skill'e giren: §3'e bu doğrulama notu +
    finding-contract.md'ye out-of-scope yuvası (peşine düşme, ama yaz —
    bu kanal koşunun en ciddi açığını taşıdı).
+
+---
+
+# Saha koşusu geri bildirimi #3 — 27 Tem 2026 (v2.3.0 koşusu, 4 dar lane)
+
+**Tutulan kural: proof scope.** 12/12 dolduruldu, 9'u "statik, canlı koşulmadı"
+dedi, tek `verified-empirically` olan en ciddi bulgu çıktı. Triyaj süresini
+belirgin kısalttı — alan aynen kalıyor.
+
+1. **Out-of-scope kanalı 0/3 kullanıldı** ama aynı worker'lar kendiliğinden
+   24 satırlık IPC coverage tablosu ve navigation review bölümü yazdı. Bilgi
+   üretiliyor, başlığa gitmiyor. Çözüm biçim değişikliği: opsiyonel başlık
+   yerine **zorunlu `## Coverage` bölümü** (surfaces examined / not examined /
+   out of scope), tablo kabul ediliyor, mekanik acceptance'a dahil.
+
+2. **Changelog 6 lane'in 1'inde, sonraki turda 4'ün 1'inde yazıldı.** İskelet
+   tek başına yetmedi. Çözüm: **acceptance komutuna bağlandı** — worker kendi
+   döngüsünde kırmızı görüp yazıyor; mimar kontrolü §6'da kalıyor. Dört durumda
+   (yok/boş/skeleton/dolu) bash+zsh, `set -e` ile ve olmadan sınandı.
+
+3. **§4 per-class closure zorlamıyordu:** "7/7 → 0/7" ile sınıf kapandı sanıldı,
+   Codex aynı sınıfın iki formunu daha buldu. Çözüm: kapanış artık **en az iki
+   varyantın adlandırılmasını ve denetlenmesini** şart koşuyor; ledger kaydı
+   sınıf adı + varyant + verdict taşıyor, liste yoksa kapanış yok.
+
+4. **`turn/completed` başarı sinyali değil.** Sağlayıcı reddi (`status: failed`,
+   `codexErrorInfo: cyberPolicy`) 4 lane'in 1'inde oldu, sarmalayıcı yine `OK`
+   dedi — boş lane bitmiş gibi teslim edildi. Çözüm **kodda**: dispatch.py artık
+   `turn/completed` içindeki `status`/`error.codexErrorInfo` alanlarını okuyup
+   turu düşürüyor. Dört senaryoda sınandı (saha vakası, düz status alanı,
+   başarılı tur, alan yok = eski sürüm uyumu).
+
+5. **Probe'lar bayatlıyor ve söylemiyordu.** Refactor bir probe'u geçersiz
+   kıldı. Çözüm: probe sözleşmesi **üç durumlu** — `1` arıza var, `0` yok,
+   `2` probe geçersiz; `rc=2` bir bulgudur, asla pass değil. §4 kapanışı
+   düzeltmeden sonra TÜM probe'ları yeniden koşturuyor.
+
+Ek olarak, hafızada ölçülü durup skill'de düzeltilmemiş iki tuzak kapatıldı:
+`§0.1`'in `-maxdepth 7`'si gerçek kurulum yolunu (8 seviye) bulamıyordu →
+`-maxdepth 10`; ve zsh word-splitting tuzağı (5 dosya sessizce kopyalanmadı,
+diff kontrolü yine yeşil verdi çünkü izlenmeyen dosyalara bakmıyordu) yazıldı.
+
+Ek bulgu (bu düzeltme turunda ölçüldü): `§0.1`'in `-print -quit`'i cache'te
+birden fazla sürüm varken **eskisini** seçiyor. Yeniden üretildi: 2.4.0 ve
+2.5.0 yanyanayken 2.4.0 döndü — yani bir önceki sürümün script'leri bu sürümün
+protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.

@@ -1,6 +1,6 @@
 ---
 name: codex-audit
-description: Audit a codebase with outside eyes - a Codex red team hunts vulnerabilities and vibe-code residue in a disposable worktree, Claude verifies every finding against the live tree and fixes what survives. Use when the user asks to audit the day's work, or explicitly asks for a comprehensive refactor.
+description: Audit a codebase with outside eyes - a Codex red team hunts vulnerabilities, fragility and vibe-code residue in a disposable worktree, Claude verifies every finding against the live tree, fixes what survives and promotes each proof into a permanent regression test. Use when the user asks to audit the day's work, asks to harden a codebase to production quality, or explicitly asks for a comprehensive refactor.
 ---
 
 # codex-audit - outside eyes on code Claude wrote
@@ -38,13 +38,23 @@ lane model. This skill is the audit protocol on top of that machinery.
 | Who edits | Claude, after verification | Claude, always, in gated batches |
 | Bar | a runnable proof per finding | the gate stays green and the counters move down |
 
+A request to "harden this", "make it production-ready", "bulletproof it" is
+**mode A's shape** - hunt with proofs - with the whole project as the priority
+(not just today's diff) and §2's fragility questions switched on. It is not
+mode B: refactoring taste is not what bulletproof asks for; demonstrated
+failures converted into regression tests are.
+
 Mode B is never automatic. A comprehensive refactor of a working codebase is the
 highest-risk operation in this skill: it touches everything, it is judged by
 taste, and "no behaviour change" is only as provable as the project's tests.
-**Thin tests mean small batches or no refactor** - say that out loud rather than
-discovering it after 40 files moved.
+**Thin tests mean small batches, or tests first, or no refactor** - say that
+out loud rather than discovering it after 40 files moved. Tests-first is the
+strongest of the three: a test-writing batch against the map's named critical
+paths is spec-complete grunt work - exactly what `codex-delegate` lanes are
+for - and every later batch is judged by the gate it raises.
 
-Both modes include the hygiene lens (§5). Security lenses belong to mode A.
+Both modes include the hygiene lens (§5). Security and fragility lenses belong
+to mode A.
 
 ## 1. Trigger and scope
 
@@ -78,13 +88,14 @@ introduced today - it is an old latent flaw that today's change made
 *reachable*. Confining the hunt to the diff misses exactly that class. Give the
 worker the whole project and tell it where today's changes are.
 
-## 2. Threat model first - the lens set is derived, not fixed
+## 2. Threat model and fragility map first - the lens set is derived, not fixed
 
 Before fanning out, classify the surface. This is step one because skipping it
 turns the audit into ritual: a report of "SQL injection" in a function only the
 user can call from their own terminal burns money and drowns the signal.
 
-Answer these from the code, not from assumption:
+Answer these from the code, not from assumption. The security questions find
+who can break the code:
 
 - Does anything accept **untrusted input**? From where - network, files, args,
   another process?
@@ -94,6 +105,28 @@ Answer these from the code, not from assumption:
 - What **privilege** does it run with, and can a lower-privileged caller reach a
   higher-privileged path?
 - What crosses a **trust boundary** - and is the boundary written down anywhere?
+
+The fragility questions find where it breaks by itself:
+
+- What happens when a **dependency fails mid-operation** - network gone, disk
+  full, a subprocess killed? Which operations leave partial state behind?
+- What runs **long-lived**, and what accumulates while it does - connections,
+  handles, caches, queues, temp files?
+- What does the code **assume about its environment** - config present,
+  versions matching, ports free - and does a wrong assumption fail at startup
+  (cheap) or at first use (expensive)?
+- When it breaks in production, **can anyone tell why** - does the cause
+  survive to the log line, or is it swallowed on the way up?
+- Which paths are **critical but untested**? Name them: they set the hunt's
+  priorities, feed mode B's coverage counter and §4's promotion step.
+
+**Build the map with your own subagents when the codebase is more than a few
+files.** One subagent per area - entry points, IO and dependency boundaries,
+error paths, state lifecycle, test coverage of critical paths - each returning
+a compact map, not file dumps. The lane briefs are then written FROM the map.
+This is the measured shape: narrow, map-derived briefs deliver (2/2 in the
+field) and wide briefs do not (1/7). The map is Claude's work; the deep dig
+into what the map flags is what the Codex lanes are for.
 
 `references/lenses.md` maps each answer to its lenses. Pick only what the
 answers justify, and say in the report which lenses you did NOT run and why -
@@ -167,8 +200,14 @@ the aggregation layer:
 - Claude reads the files. No parent's context ever holds the findings, which
   also serves the reason for fanning out in the first place.
 - **Acceptance is mechanical:** every lens named in the brief has a non-empty
-  findings file on disk. Missing or empty -> the turn is incomplete, retry that
-  lens. The check reads the disk, never the report.
+  findings file on disk, and every findings file ends with a `## Coverage`
+  section. Missing, empty, or coverage-less -> the turn is incomplete, retry
+  that lens. The check reads the disk, never the report.
+- **A lane that returns zero findings is not evidence of a clean lens** until
+  you have read the tail of its `RAW_OUTPUT.log`. A provider-side refusal
+  (`status: failed`, `codexErrorInfo: cyberPolicy`) hit 1 of 4 red-team lanes
+  in the field. dispatch.py now fails the turn on it, but the habit is the
+  backstop.
 - **When clearing stale findings before a retry, use
   `find "$LANE/.delegate-runs/$TASK_ID/findings" -name '<lens>.md' -delete`,
   never a shell glob.** zsh (the macOS default) aborts the entire command when
@@ -205,8 +244,10 @@ clear "here is what would settle it" is a real result.
 **Claude's verification, in this order** - cheapest first, and most findings die
 before an agent is involved:
 
-1. **Run the proof.** Does not reproduce -> the finding is dead. Free,
-   deterministic, no judgment. This is the bulk of the filtering.
+1. **Run the proof.** Exit `1` -> live, continue. Exit `0` -> does not
+   reproduce, the finding is dead. Exit `2` -> the probe is invalid, which is
+   neither: fix the probe or judge the finding by hand, never file it as
+   passed. Free, deterministic, no judgment. This is the bulk of the filtering.
 2. **Re-anchor it.** Open `where` in the live tree. Lanes lag; the line may have
    moved, the code may already be fixed.
 3. **Judge reachability** - this is where Opus subagents earn their cost. The
@@ -226,17 +267,37 @@ Findings that survive all four are real. Everything else is logged as rejected
 A fix is proven by the proof flipping red -> green, but that green is exactly
 as wide as the probe. Before closing a confirmed finding:
 
-1. **Read the proof's scope label.** `partially-verified` means the probe
+1. **Re-run every probe in the run, not just the one you fixed.** A fix is a
+   change, and changes invalidate instruments. Three outcomes, all meaningful:
+   `1` still broken, `0` fixed, `2` **probe invalid** - and `rc=2` is itself a
+   finding, never a pass. It means the class is neither closed nor known-open:
+   rewrite the probe against the new shape and re-verify, or log the finding as
+   reopened. Measured: a refactor pushed a probe to `rc=2` mid-run.
+2. **Read the proof's scope label.** `partially-verified` means the probe
    exercised one path; the fix may have closed one door on a room with two.
-2. **Ask §2's question once more, scoped to this finding:** is the same
-   capability reachable through another entry point? Enumerate candidates from
-   the threat model. If any exist, dispatch one narrow re-hunt brief on that
-   class - not a full re-audit.
+3. **Name two other forms of the class, and check them.** Not "consider
+   whether" - produce them. Enumerate from §2's threat model at least **two
+   variants the original repro did not use** (a second entry point, a different
+   caller, an alternate encoding, the same capability via another API), check
+   each against the live tree, and record each with its verdict. Fewer than two
+   candidates exist? Say so explicitly and say why the class is that narrow.
+   The closure entry in the ledger carries: class name, the variants checked,
+   and each verdict. **A closure without that list is not a closure.**
+4. **Promote the probe into the project's test suite.** Rewrite it as a
+   permanent test in the project's own framework, named for the finding class,
+   asserting exactly the behaviour the fix bought. Architect work, never the
+   red team's - it is integration. The probe script itself does not enter the
+   repo; its assertion does. This is the step that compounds: every
+   demonstrated failure becomes a regression tripwire, and "bulletproof" is
+   not an adjective here - it is a codebase that has accumulated its proofs
+   as tests.
 
-Measured miss that put this step here: a finding was fixed, its probe went
-green, and the same capability stayed reachable through a second surface the
-probe never touched. The proof-flip criterion is per-path by construction;
-closure has to be per-class.
+Two measured misses put this step here, both of the same shape. A finding was
+fixed, its probe went green, and the same capability stayed reachable through a
+second surface the probe never touched. And a class declared closed at "7/7
+fixed" was reopened by the red team with two further forms of the same flaw.
+The proof-flip criterion is per-path by construction; closure has to be
+per-class, and per-class is only real when the other forms are named on paper.
 
 ## 5. Hygiene - the vibe-code lens
 
@@ -284,7 +345,8 @@ Explicit request only. Sequence:
 
 1. **Inventory, deterministically.** Counters and the project's own tools
    produce exact numbers: `any` occurrences, unreferenced exports, duplicate
-   blocks, files over a size, functions over a complexity. Free and exact - no
+   blocks, files over a size, functions over a complexity - and, from §2's
+   map, **critical paths with no test touching them**. Free and exact - no
    model needed and no model trusted.
 2. **Codex lanes only for what counters cannot see**: is this abstraction used
    once, is this wrapper pass-through, does this pattern repeat with variations
@@ -305,8 +367,8 @@ conversation, not a bigger hammer.
 
 `.delegate-runs/AUDIT/ledger.jsonl`, append-only, one line per audit and one per
 confirmed finding. It carries `base_sha`, date, lenses run, lenses skipped,
-findings confirmed, findings rejected with reasons, and for mode B the
-before/after counts.
+findings confirmed, findings rejected with reasons, the path of each test
+promoted from a probe (§4), and for mode B the before/after counts.
 
 Two things it buys:
 
@@ -325,11 +387,14 @@ commitment boundary (arXiv 2607.10526), and the best-known predecessor shipped
 the same `[LEARNED:]` pattern and was archived. Statistics find the candidate, a
 model drafts the wording, a human approves.
 
-**And the scalar this skill is judged by.** Confirmed findings over total
-findings, across audits. If that ratio collapses, the skill is producing noise
-and should be narrowed or dropped - and the ledger is what makes that
-answerable instead of a feeling. A tool that cannot tell you whether it is
-working is the failure mode this whole project came out of.
+**And the scalars this skill is judged by.** For the hunt: confirmed findings
+over total findings, across audits. If that ratio collapses, the skill is
+producing noise and should be narrowed or dropped. For the hardening goal:
+regression tests promoted from probes, and the critical-path coverage counter
+moving - a codebase getting harder shows it in those two numbers, not in
+adjectives. The ledger is what makes both answerable instead of a feeling; a
+tool that cannot tell you whether it is working is the failure mode this whole
+project came out of.
 
 ## 8. Report
 

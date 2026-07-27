@@ -368,7 +368,24 @@ def main() -> int:
                     raise DispatchError(f"timed out after {args.timeout}s")
                 msg = server.read()
                 if msg.get("method") == "turn/completed":
-                    server.note("turn/completed", msg.get("params") or {})
+                    params = msg.get("params") or {}
+                    server.note("turn/completed", params)
+                    # turn/completed is NOT a success signal - it also carries
+                    # refusals and provider-side failures. Measured: OpenAI's
+                    # cybersecurity classifier rejected a red-team turn
+                    # (status=failed, codexErrorInfo=cyberPolicy) and this
+                    # wrapper still printed OK, so an empty lane was delivered
+                    # as a finished one.
+                    turn = params.get("turn") or params
+                    status = turn.get("status") or params.get("status")
+                    if status is not None and status != "completed":
+                        err = turn.get("error") or params.get("error") or {}
+                        kind = err.get("codexErrorInfo") if isinstance(err, dict) else None
+                        raise DispatchError(
+                            f"turn ended with status={status!r}"
+                            + (f" codexErrorInfo={kind!r}" if kind else "")
+                            + f": {json.dumps(err)[:400]}"
+                        )
                     break
                 server.handle(msg)
         except DispatchError as exc:

@@ -63,14 +63,49 @@ Every command below calls `$SKILL_DIR/scripts/...`. Resolve it first, because
 shell you run commands in - pasting it verbatim yields an empty path.
 
 ```bash
-SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 7 -type f \
-  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
-  | sed 's|/scripts/doctor.py||')
+SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 10 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' 2>/dev/null \
+  | sort -V | tail -1 | sed 's|/scripts/doctor.py||')
 echo "${SKILL_DIR:?codex-delegate scripts not found - is the plugin installed?}"
 ```
 
+Two measured corrections live in that command, both silent when wrong:
+
+- **`-maxdepth 10`.** The installed path is 8 levels deep
+  (`plugins/cache/<plugin>/<plugin>/<version>/skills/codex-delegate/scripts/`) -
+  the version segment adds one, and the earlier `-maxdepth 7` returned
+  **nothing**. An empty `SKILL_DIR` then fails downstream as
+  `python3 "/scripts/doctor.py"`, which is why the `:?` guard is not decoration.
+- **`sort -V | tail -1` instead of `-print -quit`.** The cache keeps one
+  directory per installed version, and `-quit` takes whichever the filesystem
+  hands over first - reproduced here: with 2.4.0 and 2.5.0 both present it
+  picked **2.4.0**. Running the previous version's scripts against this
+  version's protocol is the kind of failure that shows up as an unrelated bug
+  three steps later. Sorting by version and taking the last one is the fix; an
+  install that leaves no stale directories behind (uninstall, install, remove
+  the old cache dir) is the belt to that suspenders.
+
 No wildcards on purpose: zsh (the macOS default) aborts the whole command when
 a glob matches nothing. `find` has no such behaviour.
+
+**Two zsh traps, same family, both measured in one session:**
+
+- **Glob abort.** `rm -f findings/*.md probes/*.sh` with no `probes/*.sh` match
+  cancels the *entire* command - the `.md` files stay too. Fixture files
+  survived this way and contaminated a lane. Use `find <dir> -name '<pat>'
+  -delete` when clearing directories.
+- **No word splitting.** zsh does NOT split an unquoted variable on spaces:
+
+  ```bash
+  NEW="a.py b.py c.py"
+  for f in $NEW; do cp "$f" "$WT/$f"; done   # zsh: one file named "a.py b.py c.py"
+  ```
+
+  Field cost: 5 files silently failed to copy into four lanes, and the diff
+  check still went green because it compared tracked files while the missing
+  ones were untracked. Use an array (`NEW=(a.py b.py)`) or `for f in a.py b.py`.
+  The lesson generalises past zsh: a verification that measures the wrong thing
+  is worse than none.
 
 **Python 3.11+ is required**: both scripts import `tomllib`. Stock macOS
 `/usr/bin/python3` is 3.9 and dies at the import line.
@@ -183,12 +218,30 @@ printf '# RUN %s / turn <N>\nstatus: SKELETON - worker has not filled this in\n'
   "$TASK_ID" > "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md"
 ```
 
-Why a pre-seeded file instead of an instruction: "write turn-N.md, a hard
-deliverable, never optional" was measured not to bind - two field turns in a
-row produced no changelog, the second despite extra emphasis in the prompt.
-A file the worker must overwrite turns the deliverable from something to
-remember into something already in front of it, and gives §6 a mechanical
-check: a surviving skeleton marker fails the turn.
+**And make the acceptance command check it.** The spec's ACCEPTANCE wrapper
+opens with:
+
+```bash
+CL=".delegate-runs/<task-id>/turn-<N>.md"
+if [ ! -s "$CL" ] || grep -q SKELETON "$CL"; then
+  echo "ACCEPTANCE: changelog $CL missing or not filled in" >&2; exit 1
+fi
+```
+
+(Verified in all four states - missing, empty, skeleton, filled - under both
+bash and zsh, with and without `set -e`. Written as an `if` rather than an
+`||`/`&&` chain on purpose: the chain form is correct but depends on operator
+precedence that reads wrong at a glance, and this line is meant to be copied.)
+
+Why both a seeded file and an acceptance gate, in escalating order of force:
+prose did not bind (a "hard deliverable, never optional" changelog was written
+in **1 lane out of 6**, and the miss survived extra emphasis in the prompt).
+The seeded skeleton made it a slot to fill rather than a rule to remember. The
+acceptance gate is what makes skipping it *fail the worker's own loop* - the
+worker runs acceptance itself, sees red, and writes the changelog before it can
+finish. A rule that only the architect enforces is discovered after the turn is
+over; one inside acceptance is enforced during it. §6 keeps the same check as
+the architect's independent verdict.
 
 **You own the turn counter.** Every dispatch is a cold start - the worker has
 no memory of earlier turns and cannot know N. Before each retry, rewrite the
@@ -233,6 +286,17 @@ growth when a lane feels slow instead of waiting the timeout out.
 turn never completed; FINAL.txt then contains `DISPATCH FAILED: <reason>`. Read
 the last ~40 lines of RAW_OUTPUT.log for the cause and go to §10 - never treat
 a stale report as this round's result.
+
+**A provider can refuse a turn, and the refusal arrives as a completion.**
+`turn/completed` carries a `status` and, when it failed, `error.codexErrorInfo`.
+Measured: OpenAI's cybersecurity classifier rejected a red-team turn
+(`status: failed`, `codexErrorInfo: cyberPolicy`) in **1 of 4 lanes**, and the
+wrapper still reported `OK` because it only checked that a final message
+existed - an empty lane delivered as a finished one. dispatch.py now inspects
+those fields and exits non-zero, so the exit-code rule above covers this case
+too. Expect it occasionally on red-team briefs: it is a policy refusal, not a
+bug to work around, and a lane that returns zero findings is worth a look at
+`RAW_OUTPUT.log`'s tail before it is believed.
 
 ## 6. Verify a lane before trusting it
 

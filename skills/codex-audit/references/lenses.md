@@ -20,11 +20,18 @@ a lens set chosen without knowing the blind spots produces false confidence.
 | has privilege levels or multi-tenancy | `authz` |
 | pulls third-party packages | `supply-chain` |
 | concurrency, async, shared state | `state` |
+| a dependency can fail mid-operation (network, disk, subprocess) | `error-path` |
+| long-lived process, accumulating state | `resource` |
+| nontrivial config or environment surface | `config-startup` |
+| headed to production, must be diagnosable at 3am | `observability` |
 | none of the above (purely local, single user, no untrusted input) | `capability`, `secrets`, plus hygiene only |
 
 That last row matters. A single-user local tool with no network surface genuinely
 has a small attack surface, and the honest audit is short. Running eight lenses
 on it produces eight files of speculation and teaches the user to ignore reports.
+The fragility rows are the exception to "short": a hardening request (SKILL.md
+§0) switches them on even when the attack surface is small - a local tool can
+still corrupt its own state on a half-finished write.
 
 ## The lenses
 
@@ -119,6 +126,50 @@ Blind to: a compromised version of a package that pins correctly.
 (`codex-delegate` §0), so default to reading manifests only and mark advisory
 checks `unverified` when network is denied.
 
+## The fragility family - production readiness
+
+Security lenses ask who can break the code; these ask where it breaks by
+itself. Same finding contract, same probe rule - a probe here **induces** the
+failure (kill the subprocess mid-write, deny the config file, cap the file
+descriptors, fill the temp dir) and shows the wrong behaviour. If the failure
+cannot be induced cheaply, `confidence: unverified` with the command that
+would settle it - same as everywhere else.
+
+### `error-path` - what failure leaves behind
+Looks for: swallowed exceptions, catch blocks that log and continue into
+undefined state, partial writes with no cleanup or rollback, error handling
+that loses the original cause, a failure inside cleanup that masks the real
+error, retries that re-run non-idempotent work.
+
+Blind to: the happy path, by definition. It complements the functional tests,
+never replaces them.
+
+### `resource` - what accumulates under normal use
+Looks for: unclosed handles and connections, caches and queues with no bound,
+missing timeouts on outbound calls, subprocesses never reaped, temp files
+never deleted, listeners registered and never removed. `dos` covers an
+attacker forcing exhaustion; this lens covers the process exhausting itself
+on a normal Tuesday.
+
+Blind to: leaks that need days of uptime to matter - report the mechanism with
+a short-horizon probe, not a wall-clock proof.
+
+### `config-startup` - the environment assumption
+Looks for: config read without defaults or validation, a wrong assumption that
+fails at first use instead of at boot (expensive versus cheap), version or
+schema drift between components, ports and paths assumed free, a required
+secret whose absence goes undetected until a request needs it.
+
+Blind to: deployment topology that is not represented in the repo.
+
+### `observability` - can a 3am failure be diagnosed
+Judgment lens on the hygiene bar: `proof: n/a (hygiene)`, `cost:` required.
+Looks for: errors logged without the cause or input that produced them, silent
+fallbacks that mask degradation, failures that cannot be traced back to a
+request, logging absent exactly on the paths the §2 map calls critical.
+
+Blind to: whether anyone reads the logs.
+
 ## Writing the lens brief
 
 The lane's brief is the subagent's entire contract - it cannot see the
@@ -134,3 +185,12 @@ And state the two things that are easy to leave implicit:
 
 > Do not report style preferences, hypothetical refactors, or missing features.
 > If you cannot name a file and line, it is not a finding.
+
+> End your findings file with a `## Coverage` section: surfaces examined (a
+> table is fine), what you did not reach and why, and anything real you noticed
+> outside this lens under `out of scope`. This section is required and is
+> checked mechanically.
+
+> Probes exit `1` when the flaw reproduces, `0` when it does not, and `2` when
+> the probe itself no longer applies - print one line to stderr saying what
+> stopped applying before exiting `2`.

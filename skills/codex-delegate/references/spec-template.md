@@ -49,7 +49,9 @@ Example:
 
 ## ACCEPTANCE
 <ONE runnable, self-contained command using a project-local runner. The architect
- runs this exact command independently; the exit code is the verdict.>
+ runs this exact command independently; the exit code is the verdict.
+ It MUST fail while this turn's changelog is missing or still the seeded
+ skeleton - put that check first, before the project's own checks.>
 
 ## CONVENTIONS
 <2-3 existing files the worker must read first and imitate. Style is shown, not
@@ -68,6 +70,10 @@ Example:
   outside the whitelist, so the changelog must be listed or the two rules
   contradict each other. A worker was observed skipping the changelog while still
   reporting its path.
+- **Changelog check inside ACCEPTANCE**: measured, the changelog was written in
+  1 lane out of 6 while the contract called it mandatory - prose does not bind
+  a deliverable the worker gets no feedback on. Inside acceptance, the worker's
+  own self-loop turns red until the file is filled in.
 - **BASE_SHA in the file**: recovery runs and reviewers can establish the baseline
   without asking Claude.
 - **Acceptance is one command**: multi-step criteria drift; a single exit code
