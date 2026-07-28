@@ -69,15 +69,34 @@ in as a *hint*, never as the boundary:
 
 ```bash
 LAST=$(python3 - <<'PY'
-import json,pathlib
+import json, pathlib
 p = pathlib.Path(".delegate-runs/AUDIT/ledger.jsonl")
-lines = [json.loads(l) for l in p.read_text().splitlines() if l.strip()] if p.exists() else []
-print(lines[-1]["base_sha"] if lines else "")
+sha = ""
+if p.exists():
+    for line in p.read_text().splitlines():          # the ledger interleaves audit
+        if not line.strip():                          # lines and finding lines, so
+            continue                                  # scan for the LAST one that
+        try:                                          # actually carries a base_sha
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("base_sha"):
+            sha = rec["base_sha"]
+print(sha)
 PY
 )
+echo "${LAST:-(no previous audit - scoping against the whole history)}"
 git diff --stat ${LAST:+$LAST..}HEAD          # what actually changed
 git status --porcelain -uall                   # plus what is still uncommitted
 ```
+
+**Read that echo before you trust the diff.** Taking `lines[-1]["base_sha"]`
+was the earlier version and it is wrong: the ledger interleaves one line per
+audit with one line per confirmed finding, so the last line is usually a
+finding and has no `base_sha`. Measured: the lookup blew up, `LAST` came back
+empty, and the scope silently became "nothing" - an audit that would have run
+against an empty diff. A scope query that fails to a blank instead of an error
+is the dangerous shape; the echo is what makes the blank visible.
 
 A red team told "we added login" looks at login. A red team given the diff finds
 the thing you touched and forgot to mention. That is the whole point of outside
@@ -127,6 +146,20 @@ a compact map, not file dumps. The lane briefs are then written FROM the map.
 This is the measured shape: narrow, map-derived briefs deliver (2/2 in the
 field) and wide briefs do not (1/7). The map is Claude's work; the deep dig
 into what the map flags is what the Codex lanes are for.
+
+**Give each subagent a disjoint area, exactly as §3 requires of lanes.** Two
+agents pointed at the same file is an architect error at any scale - it
+duplicates the reading you fanned out to avoid, and when the agents *write*
+(fix batches, test batches) it is a lost-update race that nothing detects.
+Overlapping fix subagents got away with it once in the field by luck; the rule
+is not "coordinate them", it is "split so there is nothing to coordinate".
+
+> **Gate: the map does not replace the lanes.** When the map is done, dispatch
+> §3's hunter lanes. A map that produced plenty of findings is exactly when
+> this gets skipped - measured: the map was rich, the lanes were forgotten,
+> and the audit shipped without the outside eyes that are the entire product.
+> Claude reading Claude's code is the thing this skill exists to avoid. If you
+> are about to write the report and no lane has run, you are not at §8 yet.
 
 `references/lenses.md` maps each answer to its lenses. Pick only what the
 answers justify, and say in the report which lenses you did NOT run and why -
@@ -267,12 +300,31 @@ Findings that survive all four are real. Everything else is logged as rejected
 A fix is proven by the proof flipping red -> green, but that green is exactly
 as wide as the probe. Before closing a confirmed finding:
 
-1. **Re-run every probe in the run, not just the one you fixed.** A fix is a
-   change, and changes invalidate instruments. Three outcomes, all meaningful:
-   `1` still broken, `0` fixed, `2` **probe invalid** - and `rc=2` is itself a
-   finding, never a pass. It means the class is neither closed nor known-open:
-   rewrite the probe against the new shape and re-verify, or log the finding as
-   reopened. Measured: a refactor pushed a probe to `rc=2` mid-run.
+1. **Re-run every probe in the run, not just the one you fixed - against the
+   tree you fixed.** Pass the root explicitly and check the root the probe
+   echoes back:
+
+   ```bash
+   AUDIT_ROOT="$(git rev-parse --show-toplevel)" bash "$LANE/.delegate-runs/$TASK_ID/probes/<name>.sh"
+   # first line of stderr must name the MAIN tree, not the lane
+   ```
+
+   A fix lands in the main tree while the probes live in the lane, so this is
+   the step where a probe measures the old code and reports nothing changed.
+   Measured, and it cost a whole verification round: **13 of 13 probes were
+   re-run against the stale lane copy.** `cd` into the main tree does not fix
+   a probe that derives its root from its own path - either the probe honours
+   `AUDIT_ROOT` (the contract now requires it) or it must be copied into the
+   main tree *at the same relative depth* it expects. Check the echoed root
+   before believing any verdict.
+
+   Three outcomes, all meaningful: `1` still broken, `0` fixed, `2` **probe
+   invalid** - and `rc=2` is itself a finding, never a pass. It means the class
+   is neither closed nor known-open: rewrite the probe against the new shape
+   and re-verify, or log the finding as reopened. Measured: a refactor pushed a
+   probe to `rc=2` mid-run. Note what `rc=2` does *not* catch - a probe that
+   greps source text keeps "working" after a fix changes the wording, which is
+   why the contract requires probes to exercise behaviour.
 2. **Read the proof's scope label.** `partially-verified` means the probe
    exercised one path; the fix may have closed one door on a room with two.
 3. **Name two other forms of the class, and check them.** Not "consider
@@ -365,10 +417,18 @@ conversation, not a bigger hammer.
 
 ## 7. The ledger - and the only honest form of "learning"
 
-`.delegate-runs/AUDIT/ledger.jsonl`, append-only, one line per audit and one per
-confirmed finding. It carries `base_sha`, date, lenses run, lenses skipped,
-findings confirmed, findings rejected with reasons, the path of each test
-promoted from a probe (§4), and for mode B the before/after counts.
+`.delegate-runs/AUDIT/ledger.jsonl`, append-only, with two kinds of line
+interleaved - so **every line carries a `type` field** (`"audit"` or
+`"finding"`) and queries filter on it. §1's scope lookup is the cautionary
+tale: written as "read the last line", it broke the moment a finding line was
+appended after the audit line, which is always.
+
+- `type: "audit"` - `base_sha`, date, lenses run, lenses skipped, counts of
+  findings confirmed and rejected, lanes dispatched, and for mode B the
+  before/after counts.
+- `type: "finding"` - class, severity, verdict, the rejection reason when
+  rejected, the closure variants checked (§4), and the path of the test
+  promoted from its probe.
 
 Two things it buys:
 
@@ -401,6 +461,11 @@ project came out of.
 To the user, in chat: which lenses ran and which did not and why, each confirmed
 finding with its proof and reachability, what was rejected and why, what was
 fixed and the proof flipping to green, what is left open. Then the ledger lines.
+
+Two things the report must state plainly, because their absence is invisible:
+**which lanes ran** (if none did, the audit had no outside eyes - say so
+instead of letting the map's findings read as a red-team result), and **which
+tree each probe verdict was measured against**.
 
 Nothing is committed. Fixes sit uncommitted for the user, same as
 `codex-delegate` §1.

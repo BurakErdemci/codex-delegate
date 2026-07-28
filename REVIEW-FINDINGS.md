@@ -1051,3 +1051,43 @@ Ek bulgu (bu düzeltme turunda ölçüldü): `§0.1`'in `-print -quit`'i cache't
 birden fazla sürüm varken **eskisini** seçiyor. Yeniden üretildi: 2.4.0 ve
 2.5.0 yanyanayken 2.4.0 döndü — yani bir önceki sürümün script'leri bu sürümün
 protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
+
+---
+
+# Saha koşusu geri bildirimi #4 — 28 Tem 2026 (v2.5.0 koşusu)
+
+1. **§1 kapsam sorgusu hatalıydı — kod hatası.** `lines[-1]["base_sha"]`, oysa
+   ledger audit ve finding satırlarını iç içe tutuyor; son satır neredeyse her
+   zaman bir finding. Sahada `LAST` boş döndü, kapsam sessizce "hiçbir şey"
+   oldu. Çözüm: `base_sha` taşıyan SON satırı ara + bulunan değeri `echo` ile
+   görünür kıl + §7'de her satıra `type` alanı şart koşuldu. Beş ledger
+   biçiminde sınandı (saha vakası, iki audit turu, ledger yok, bozuk satır,
+   yalnız audit satırı); eski yazım ilk ikisinde KeyError, dördüncüde
+   JSONDecodeError veriyordu.
+
+2. **Probe'lar bayat ağacı ölçüyordu.** Probe kökünü kendi konumundan çözerse,
+   düzeltme ana ağaçta yapıldığı halde lane'deki eski kodu ölçer — sahada
+   **13 probe'un 13'ü** böyle yanlış ölçüldü ve `cd` yetmedi. Çözüm sözleşmede:
+   kök `${AUDIT_ROOT:-$(git rev-parse --show-toplevel)}` ile çözülür, ilk satır
+   olarak stderr'e basılır, §4 koşturma adımı `AUDIT_ROOT` vererek çağırır ve
+   eko edilen kökü kontrol eder.
+
+   **Kalıbı sınarken kendi ilk taslağımda yanlış-yeşil bulundu:** hedef dosya
+   yoksa `grep -q ... || exit 0` "düzeltilmiş" diyordu. Guard eklendi (kök ya da
+   hedef yoksa `exit 2`) ve beş koşulda yeniden sınandı: arızalı=1,
+   düzeltilmiş=0, bayat kök=1 (bayatlığı gizlemiyor), kök yok=2, boş kök=2.
+
+3. **Probe kaynak metni değil davranış ölçmeli.** Bir worker regex-over-source
+   probe yazdı; düzeltme sözcüğü değiştirince probe "hâlâ canlı" dedi. `rc=2`
+   bunu yakalayamaz çünkü probe kendini geçersiz saymıyor. Sözleşmeye açık
+   kural + ölçülemiyorsa `unverified` (grep'i kanıt diye sunma).
+
+4. **Harita lane'lerin yerine geçti.** Harita çok bulgu çıkarınca §3 atlandı ve
+   denetim dış göz olmadan tamamlandı — skill'in asıl ürünü kayboldu. Çözüm:
+   §2 sonuna kapı satırı ("harita bitince lane'ler zorunlu") + §8 raporunun
+   hangi lane'lerin koştuğunu açıkça söylemesi şartı.
+
+5. **Fan-out disjointliği yalnız lane'ler için yazılıydı.** İki düzeltme
+   subagent'ına aynı test dosyası verildi; şans eseri ezilme olmadı. §2'ye
+   subagent'lar için de aynı kural: kesişen alan mimarın hatasıdır, çözüm
+   "koordine et" değil "koordine edilecek bir şey kalmayacak şekilde böl".

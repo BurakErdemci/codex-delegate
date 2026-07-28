@@ -36,6 +36,41 @@ what it looked for. A missing file is an incomplete turn, not a clean lens.
 the current code, and be something that would exit zero once the flaw is fixed.
 Red now, green after. That is the whole test.
 
+**Measure behaviour, not source text.** Call the function, start the process,
+send the request, import the module and assert what it does. A probe that
+greps the source for a pattern tests the wording of the code, not the code:
+measured, a worker wrote a regex-over-source probe, the fix changed the
+wording without changing the flaw's status, and the probe reported the finding
+still live. The `rc=2` escape does not catch this - the probe does not know it
+has stopped measuring anything. If behaviour genuinely cannot be exercised
+(the code path needs hardware, a service, a GUI), that is a
+`confidence: unverified` finding, not a grep dressed as a proof.
+
+**Resolve the tree root explicitly, never from the script's own location -
+and verify it before measuring anything:**
+
+```bash
+ROOT="${AUDIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
+echo "probe root: $ROOT" >&2                    # first line of output, always
+[ -n "$ROOT" ] && [ -e "$ROOT/<the file or entry point this probe needs>" ] || {
+  echo "probe invalid: cannot locate target under root '$ROOT'" >&2; exit 2; }
+```
+
+That guard is not boilerplate. Written without it - the first draft of this
+very contract - a probe whose target is missing runs
+`grep -q PATTERN "$ROOT/missing.py"`, grep fails, and the `|| exit 0` branch
+reports **fixed**. Verified in a scratch repo: the unguarded form returned
+`rc=0` for both a stale root and an empty root, which is the exact false-green
+this section exists to prevent. A probe that cannot find what it measures
+exits `2`, never `0`.
+
+Never `cd "$(dirname "$0")/../.."`. Probes are written inside a disposable
+lane and re-run later against the fixed main tree; a root derived from the
+script's own path silently follows the script instead of the code under test.
+Measured, and expensively: **13 of 13 probes were re-run against the stale
+lane copy** and every verdict was wrong. Printing the resolved root as the
+first line is what makes that visible in one glance instead of never.
+
 **Three exit codes, not two.** A probe is a measuring instrument and it must be
 able to say that it broke:
 

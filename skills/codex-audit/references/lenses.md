@@ -194,3 +194,12 @@ And state the two things that are easy to leave implicit:
 > Probes exit `1` when the flaw reproduces, `0` when it does not, and `2` when
 > the probe itself no longer applies - print one line to stderr saying what
 > stopped applying before exiting `2`.
+
+> A probe must exercise behaviour - call the function, start the process, send
+> the request. Grepping the source for a pattern is not a proof: it tracks the
+> wording of the code, and a fix that changes the wording flips it without
+> changing anything real.
+
+> Resolve the tree root as `${AUDIT_ROOT:-$(git rev-parse --show-toplevel)}`
+> and echo it to stderr as your first line. Never derive it from the script's
+> own path: probes are re-run later against a different tree.
