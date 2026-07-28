@@ -351,6 +351,51 @@ fixed" was reopened by the red team with two further forms of the same flaw.
 The proof-flip criterion is per-path by construction; closure has to be
 per-class, and per-class is only real when the other forms are named on paper.
 
+### The verification round - the fix is unaudited code too
+
+This skill's first sentence does not stop applying at the moment of the fix.
+The fix is fresh Claude-written code, and until outside eyes have read it, it
+has had none. Measured: a run's fixes went through every closure step above
+and shipped, and an independent Codex re-audit of the same work found new
+holes - the last unaudited surface in the whole flow was the fix itself. So
+closure is not the end; it is the entry to the final loop:
+
+1. **Dispatch one narrow verification lane over the fix diff.** Scope is the
+   diff the fixes produced plus the closure claims - not the whole codebase,
+   which is what keeps the round cheap. Brief per `references/lenses.md`'s
+   verification-brief section: these classes were closed by this diff; break
+   the fixes, and hunt what the diff introduced. The finding contract applies
+   verbatim - a verification finding without a probe is a hypothesis here too.
+2. **Triage every returned finding with a written verdict.** A red team asked
+   to look always finds something, so "it found things" is not the loop
+   signal - the verdicts are. For each finding, write two things down: what
+   actually happens in this project's real operating flow, and one of three
+   verdicts:
+
+   | verdict | means | consequence |
+   |---|---|---|
+   | `blocker` | confirmed, reachable in the real flow, real consequence | fix it -> the loop runs again |
+   | `guard` | low probability *only because a habit prevents it*, high consequence if the habit slips | add a cheap deterministic check that enforces the habit; no new round |
+   | `demoted` | unreachable in practice, no regression, or annoyance-only | ledger + report with the written reason; never silent |
+
+   The rule that keeps triage honest: **a demotion must name the assumption it
+   rests on.** If that assumption is "the operator always does X" rather than
+   something the code enforces, the verdict is `guard`, not `demoted` -
+   convention is not enforcement, and the guard is what converts one into the
+   other. Field example: a release-tag flaw that fires only when a tag lands
+   on an unpushed commit is "never happens" exactly as long as the human
+   tagging remembers to push first; a two-line check in the tag script makes
+   it never happen.
+3. **Terminate mechanically, not by feel.** The work is done when a
+   verification round returns **zero blockers**. `unverified`, `low`, and
+   hygiene findings never block - they enter the ledger as scope for the next
+   audit. If they blocked, the loop would never end, because a reviewer with a
+   mandate to look always returns something.
+4. **Cap at three rounds.** A third round still returning blockers is not a
+   request for a fourth - it is evidence the fixing approach is wrong, and
+   that is a conversation with the user, not a bigger hammer. Same stop
+   condition as mode B, same reason.
+
 ## 5. Hygiene - the vibe-code lens
 
 Runs in both modes. Different bar from security: no proof script, but also no
@@ -424,11 +469,13 @@ tale: written as "read the last line", it broke the moment a finding line was
 appended after the audit line, which is always.
 
 - `type: "audit"` - `base_sha`, date, lenses run, lenses skipped, counts of
-  findings confirmed and rejected, lanes dispatched, and for mode B the
-  before/after counts.
+  findings confirmed and rejected, lanes dispatched, **verification rounds run
+  and the last round's blocker count** (§4), and for mode B the before/after
+  counts.
 - `type: "finding"` - class, severity, verdict, the rejection reason when
-  rejected, the closure variants checked (§4), and the path of the test
-  promoted from its probe.
+  rejected, the demotion reason and named assumption when demoted (§4's
+  verification round), the closure variants checked (§4), and the path of the
+  test promoted from its probe.
 
 Two things it buys:
 
@@ -462,10 +509,15 @@ To the user, in chat: which lenses ran and which did not and why, each confirmed
 finding with its proof and reachability, what was rejected and why, what was
 fixed and the proof flipping to green, what is left open. Then the ledger lines.
 
-Two things the report must state plainly, because their absence is invisible:
-**which lanes ran** (if none did, the audit had no outside eyes - say so
-instead of letting the map's findings read as a red-team result), and **which
-tree each probe verdict was measured against**.
+Three things the report must state plainly, because their absence is
+invisible: **which lanes ran** (if none did, the audit had no outside eyes -
+say so instead of letting the map's findings read as a red-team result),
+**which tree each probe verdict was measured against**, and the
+**verification line**: how many verification rounds ran, the last round's
+blocker count, and every `guard` added and `demoted` finding with its written
+reason. A report with no verification line has not earned the word "done" -
+its fixes are unaudited code, which is where this rule came from: a run
+without the round shipped fixes that an independent re-audit then broke.
 
 Nothing is committed. Fixes sit uncommitted for the user, same as
 `codex-delegate` §1.

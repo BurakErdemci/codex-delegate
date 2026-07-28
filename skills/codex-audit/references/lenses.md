@@ -203,3 +203,31 @@ And state the two things that are easy to leave implicit:
 > Resolve the tree root as `${AUDIT_ROOT:-$(git rev-parse --show-toplevel)}`
 > and echo it to stderr as your first line. Never derive it from the script's
 > own path: probes are re-run later against a different tree.
+
+## The verification brief - the fix diff as the target
+
+Used by SKILL.md §4's verification round, after Claude has fixed the confirmed
+findings. Same contract as every lens brief above; what changes is the target
+and the framing. Give the worker:
+
+- **the fix diff itself** (`git diff` of the fix commits or working tree), not
+  the whole codebase - the round is cheap because the scope is small
+- **the closure claims**: each closed class, the variants that were checked,
+  and what the fix was supposed to buy
+- three hunting directions, in priority order:
+
+> 1. **Break the fixes.** Each closed class comes with the claim "this diff
+>    closes it". Treat the claim as the target: find an input, path, or
+>    encoding through which the class still fires despite the fix.
+> 2. **Hunt what the diff introduced.** A fix is new code written under
+>    pressure to make a probe go green. Look for what it broke, bypassed, or
+>    newly exposed - especially in the neighbouring code it touched.
+> 3. **Check the seams.** Where the diff meets unchanged code: changed
+>    assumptions, changed error behaviour, changed types or defaults that the
+>    unchanged callers still rely on.
+
+The framing matters because this worker reads less code than a hunter lane
+and must not pad the gap with speculation: findings still need runnable
+probes, `confidence: unverified` is still a valid result, and a fix that
+holds is a real answer - say so in the coverage section rather than
+inventing something to report.

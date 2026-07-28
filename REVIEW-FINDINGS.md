@@ -1091,3 +1091,37 @@ protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
    subagent'ına aynı test dosyası verildi; şans eseri ezilme olmadı. §2'ye
    subagent'lar için de aynı kural: kesişen alan mimarın hatasıdır, çözüm
    "koordine et" değil "koordine edilecek bir şey kalmayacak şekilde böl".
+
+---
+
+# Saha koşusu geri bildirimi #5 — 28 Tem 2026 (v2.6.0 koşusu → v2.7.0)
+
+1. **Düzeltme, akışın denetimsiz kalan son yüzeyiydi.** Akış "Codex bulur →
+   Claude doğrular ve düzeltir → push" diye işliyordu; düzeltmenin kendisi
+   Claude'un yazdığı taze kod olduğu halde hiç dış göz görmüyordu — skill'in
+   ilk cümlesinin ("Claude yazdıysa Claude yanlış denetçidir") son adımda
+   ihlali. Sahada ölçüldü: kapanış adımlarından geçip pushlanmış işler,
+   bağımsız bir Codex yeniden-denetiminde yeni açıklar verdi. Çözüm: §4'e
+   doğrulama turu — düzeltmeler bitince fix diff'ine dar brief'li tek lane,
+   sonlanana kadar döngü.
+
+2. **"İki ajan da temiz diyene kadar" öznel bir sonlanma ölçütüydü.** Bakması
+   söylenen bir red team her turda bir şey bulur; his yerine mekanik ölçüt
+   kondu: tur temiz ⇔ sıfır `blocker`. Her bulguya yazılı hüküm — `blocker`
+   (gerçek akışta erişilebilir, gerçek sonuç → düzelt, yeni tur), `guard`
+   ("düşük olasılık" yalnızca insan alışkanlığına dayanıyorsa → alışkanlığı
+   koda çeviren ucuz kontrol, yeni tur yok), `demoted` (pratikte erişilemez /
+   regresyon değil / ayrıntının ayrıntısı → yazılı gerekçeyle ledger'a).
+   Dürüstlük kuralı: demotion dayandığı varsayımı adıyla yazar; varsayım kod
+   değil alışkanlıksa hüküm `guard` olur. Tavan 3 tur — üçüncüde hâlâ blocker
+   varsa sinyal "bir tur daha" değil "yaklaşım yanlış", kullanıcıya raporlanır.
+
+3. **Kapı yine slot olarak bağlandı, metin olarak değil.** §8 raporuna zorunlu
+   doğrulama satırı: kaç tur koştu, son turun blocker sayısı, eklenen
+   `guard`'lar ve `demoted` bulgular gerekçeleriyle. Bu satır olmayan rapor
+   "done" diyemez. §7 ledger'ın audit satırına `verification_rounds` + son
+   blocker sayısı; finding satırına demotion gerekçesi eklendi.
+   `lenses.md`'ye fix-diff brief şablonu: düzeltmeleri kır, diff'in yeni
+   soktuğunu avla, dikiş yerlerini kontrol et — az kod okuyan worker boşluğu
+   spekülasyonla doldurmasın diye "düzeltme tutuyorsa bu gerçek bir sonuçtur"
+   açıkça yazıldı.
