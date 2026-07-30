@@ -94,7 +94,8 @@ def kill_tree(proc: subprocess.Popen) -> None:
 
 def codex_version() -> tuple[int, int, int]:
     out = subprocess.run(
-        [codex_path(), "--version"], capture_output=True, text=True, timeout=30
+        [codex_path(), "--version"], capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=30
     ).stdout
     for token in out.replace("v", " ").split():
         parts = token.split(".")
@@ -149,7 +150,12 @@ class AppServer:
                 # with "exited unexpectedly" and no cause.
                 spawn, cwd=str(cwd), env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
-                text=True, bufsize=1,
+                # The app-server speaks UTF-8 JSON regardless of console
+                # codepage. text=True alone decodes with the locale default -
+                # cp125x on Turkish Windows - and the first non-ASCII byte in
+                # a worker message killed the parent with UnicodeDecodeError
+                # while the worker ran on (measured 30 Jul 2026, 3 lanes lost).
+                text=True, encoding="utf-8", errors="replace", bufsize=1,
             )
         except FileNotFoundError as exc:
             # spawn[0] came out of shutil.which, so "is codex on PATH?" is the

@@ -188,6 +188,22 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
 
 - **Verify the base.** Lanes branching from a stale base is a measured failure
   mode, and it stays silent until integration.
+- **Windows: budget the path length BEFORE `worktree add`.** The sibling-dir
+  convention above adds ~34 characters over the repo root (`-lanes/` plus the
+  dated task id), and Windows still enforces MAX_PATH = 260 on most tooling.
+  Measured 30 Jul 2026: deepest tracked path 193 chars, +34 → 276, and
+  `worktree add` itself failed. Check the budget, and when it does not close,
+  put the lane under a short root instead - the convention is a default, not
+  a contract:
+
+  ```bash
+  git ls-files | awk '{ print length }' | sort -rn | head -1   # deepest tracked path
+  # if that + length of "$LANE" + 1 > 259: use a short root, e.g.
+  LANE="$HOME/ual/$TASK_ID"
+  ```
+
+  (`git config core.longpaths true` frees only git; python/node inside the
+  lane still hit the limit, so the short root is the fix, not the flag.)
 - **Trust the lane path.** Codex asks for folder trust per exact project path;
   an untrusted cwd stalls the worker's first turn on a request dispatch.py can
   only answer emptily - it looks like a hung turn and the cause appears

@@ -150,8 +150,11 @@ def trust_project(home: Path, path: Path) -> tuple[bool, str]:
         return False, f"{config} does not parse: {exc}"
     if existing.get(resolved, {}).get("trust_level") == "trusted":
         return True, f"already trusted: {resolved}"
-    with open(config, "a") as fh:
-        fh.write(f'\n[projects."{resolved}"]\ntrust_level = "trusted"\n')
+    # json.dumps, not f'"{resolved}"': a raw Windows path in a TOML basic
+    # string turns \U into a unicode escape and the WHOLE config stops
+    # parsing - measured 30 Jul 2026, while --trust still said [ ok ].
+    with open(config, "a", encoding="utf-8") as fh:
+        fh.write(f'\n[projects.{json.dumps(resolved)}]\ntrust_level = "trusted"\n')
     return True, f"trusted: {resolved}"
 
 
@@ -162,15 +165,22 @@ def untrust_project(home: Path, path: Path) -> None:
     if not config.exists():
         return
     resolved = str(path.resolve())
+    # Match every quoting the entry may carry: json.dumps (what trust_project
+    # writes), the raw basic string older versions wrote, and the TOML literal
+    # form ('...') a hand-repaired Windows config carries.
+    headers = tuple(
+        f"[projects.{q}]"
+        for q in (json.dumps(resolved), f'"{resolved}"', f"'{resolved}'")
+    )
     kept: list[str] = []
     dropping = False
-    for line in config.read_text().splitlines(keepends=True):
+    for line in config.read_text(encoding="utf-8").splitlines(keepends=True):
         stripped = line.strip()
         if stripped.startswith("["):
-            dropping = stripped.startswith(f'[projects."{resolved}"]')
+            dropping = stripped.startswith(headers)
         if not dropping:
             kept.append(line)
-    config.write_text("".join(kept))
+    config.write_text("".join(kept), encoding="utf-8")
 
 
 # ── MCP discovery ───────────────────────────────────────────────────────────

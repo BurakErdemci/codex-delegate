@@ -212,21 +212,35 @@ review lane:
 **Verify containment once per machine - the measurement above is one platform.**
 Windows enforces the sandbox through a different mechanism (the vendor tree
 ships `codex-windows-sandbox-setup.exe`), and whether `workspace-write` actually
-denies a write outside the lane there has never been measured. That containment
-is the whole licence for "the lane may do anything to itself", so establish it
-per machine, and from the outside trace - never from the worker's report, which
-is a claim about a sandbox by the thing being sandboxed:
+denies a write outside the lane there has never been measured at the OS layer.
+That containment is the whole licence for "the lane may do anything to itself",
+so establish it per machine, and from the outside trace - never from the
+worker's report, which is a claim about a sandbox by the thing being sandboxed:
 
 ```bash
-# in the lane brief, one line the worker runs:
+# in the brief of a DISPOSABLE probe lane - never a working hunter brief (below):
 echo escaped > "$HOME/codex-audit-escape-check"
 # from the architect, after the turn:
 ls "$HOME/codex-audit-escape-check" && echo "NOT CONTAINED - lane wrote outside itself"
 rm -f "$HOME/codex-audit-escape-check"        # cleanup is part of the check, not after it
 ```
 
-Until that `ls` says no such file on this machine, the isolation claim is
-unmeasured here: say so in the report rather than inheriting the macOS result.
+Two rules the first Windows run of this probe bought (30 Jul 2026):
+
+- **The probe rides alone.** Embedded in a hunter brief, the escape attempt
+  read as hostile to the worker: it refused the line as "not authorized" and
+  the lane died with `codexErrorInfo: cyberPolicy` right after, taking its
+  audit work with it. A line that can kill a lane gets a disposable lane
+  whose only job is that line.
+- **An absent file is not yet an OS verdict.** `ls` finding nothing cannot
+  distinguish the OS denying the write from the worker declining to run it.
+  Read the worker's transcript: a refusal means Codex's approval layer
+  answered and the OS layer is STILL unmeasured - that was the Windows
+  outcome. Only an attempted write the OS denies, leaving no file, measures
+  the sandbox.
+
+Until that verdict lands on this machine, the isolation claim is unmeasured
+here: say so in the report rather than inheriting the macOS seatbelt result.
 
 ### Width is what breaks - route by lens count
 
