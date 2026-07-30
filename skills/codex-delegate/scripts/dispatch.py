@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -58,9 +59,42 @@ class DispatchError(RuntimeError):
     pass
 
 
+def codex_path() -> str:
+    """Absolute path to the codex CLI - never spawn it by bare name.
+
+    npm installs the CLI as codex.CMD on Windows, and CreateProcess resolves
+    only .exe, so the bare name fails on a machine where codex is perfectly well
+    installed. Measured (Windows 11, Python 3.13.13, codex-cli 0.146.0):
+    subprocess.run(["codex", "--version"]) raises FileNotFoundError WinError 2,
+    while the same call through shutil.which("codex") ->
+    ...\\AppData\\Roaming\\npm\\codex.CMD returns rc=0. which() returns an
+    absolute path on POSIX as well, so this needs no platform branch.
+    """
+    resolved = shutil.which("codex")
+    if resolved is None:
+        raise DispatchError("codex CLI not found on PATH - npm i -g @openai/codex")
+    return resolved
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the app-server and everything it spawned.
+
+    On Windows the npm shim builds a cmd.exe -> node.exe -> codex.exe chain and
+    Popen.kill() only reaches the cmd.exe root. Measured twice on this machine:
+    after proc.kill() the node and codex.exe processes were still alive, holding
+    the model session open with nobody left to read them. taskkill /T walks the
+    tree. POSIX keeps kill(), where there is no shim to hide behind.
+    """
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       capture_output=True)
+    else:
+        proc.kill()
+
+
 def codex_version() -> tuple[int, int, int]:
     out = subprocess.run(
-        ["codex", "--version"], capture_output=True, text=True, timeout=30
+        [codex_path(), "--version"], capture_output=True, text=True, timeout=30
     ).stdout
     for token in out.replace("v", " ").split():
         parts = token.split(".")
@@ -89,7 +123,7 @@ def configured_mcp_names(codex_home: Path) -> set[str]:
 class AppServer:
     def __init__(self, codex_home: Path, cwd: Path, log, effort: str | None,
                  overrides: list[str] | None = None, timeout: int | None = None):
-        spawn = ["codex", "app-server"]
+        spawn = [codex_path(), "app-server"]
         if effort:
             spawn += ["-c", f"model_reasoning_effort={effort}"]
         for kv in overrides or []:
@@ -118,8 +152,12 @@ class AppServer:
                 text=True, bufsize=1,
             )
         except FileNotFoundError as exc:
+            # spawn[0] came out of shutil.which, so "is codex on PATH?" is the
+            # wrong question here - PATH already answered it. Name the path that
+            # failed instead; that is what distinguishes a vanished install from
+            # an unreadable one.
             raise DispatchError(
-                "cannot start `codex app-server` - is codex on PATH? "
+                f"cannot start `codex app-server` from {spawn[0]!r} "
                 f"({exc})"
             ) from exc
         except OSError as exc:
@@ -141,7 +179,7 @@ class AppServer:
     def _on_timeout(self) -> None:
         self.timed_out = True
         try:
-            self.proc.kill()
+            kill_tree(self.proc)
         except Exception:
             pass
 
@@ -239,6 +277,18 @@ class AppServer:
     def close(self) -> None:
         if self._timer is not None:
             self._timer.cancel()
+        if os.name == "nt":
+            # terminate() is TerminateProcess against the cmd.exe shim alone, so
+            # wait() would report a clean exit while node and codex.exe keep
+            # running (measured: 2 orphans per run, twice). Kill the tree first,
+            # while the parent links still exist - taskkill after the root has
+            # gone can only find children by a pid Windows may have recycled.
+            kill_tree(self.proc)
+            try:
+                self.proc.wait(timeout=10)
+            except Exception:
+                pass
+            return
         try:
             self.proc.terminate()
             self.proc.wait(timeout=10)

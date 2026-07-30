@@ -86,6 +86,20 @@ passing after a refactor moved its target is a green light with nothing behind
 it, and `2` is what prevents that. Measured: a refactor pushed a probe to
 `rc=2` and the three-state design is what kept it from reading as fixed.
 
+**There is a fourth outcome, and it is not an exit code: the probe never ran.**
+An rc can only be produced by something, and that something is not always the
+probe. Measured (Windows 11): `bash` first on `PATH` was the WSL launcher with
+no distribution installed - `bash foo.sh` printed
+`<3>WSL (9 - Relay) ERROR: CreateProcessCommon:800: execvpe(/bin/bash) failed`
+and exited `1`, which this table reads as *the flaw reproduces*. The rc table
+stays as written; what makes it trustworthy is the `probe root:` line above.
+That line is printed by the probe body, so **output without it means the probe
+never executed** - launcher failure, unreadable file, wrong interpreter - and
+the verdict is "did not run", never `1`, `0` or `2`. Print it first, always,
+before any other work: a marker emitted late cannot distinguish "never started"
+from "died halfway". SKILL.md §4 carries the run-side rule (verify the shell
+before any rc counts as a verdict).
+
 **And state what the proof covers.** A probe that exercises one call path can
 flip green while the class in `class:` stays alive through every other path.
 So answer it explicitly: does the proof verify the whole class, or a single

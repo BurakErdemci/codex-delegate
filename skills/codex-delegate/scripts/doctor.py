@@ -24,7 +24,9 @@ import sys
 if sys.version_info < (3, 11):  # tomllib arrived in 3.11; stock macOS python3 is 3.9
     sys.exit(
         f"codex-delegate needs Python 3.11+ (this is {sys.version.split()[0]} at {sys.executable}).\n"
-        "macOS ships 3.9 at /usr/bin/python3. Try python3.11/3.12/3.13, or `brew install python`."
+        "macOS ships 3.9 at /usr/bin/python3. Try python3.11/3.12/3.13, or `brew install python`.\n"
+        "On Windows `python3` is usually the Microsoft Store stub (exit 9009, no Python at all); "
+        "the working interpreter is `python`."
     )
 
 import argparse
@@ -281,11 +283,18 @@ def cmd_init(home: Path) -> int:
 
 def cmd_check(home: Path) -> int:
     problems = 0
-    if not shutil.which("codex"):
-        say(BAD, "codex CLI not on PATH - npm i -g @openai/codex")
+    codex = shutil.which("codex")
+    if not codex:
+        say(BAD, "codex CLI not found on PATH - npm i -g @openai/codex")
         return 1
     try:
-        proc = subprocess.run(["codex", "--version"], capture_output=True, text=True, timeout=30)
+        # Spawn the resolved path, not the bare name: npm installs the CLI as
+        # codex.CMD on Windows and CreateProcess resolves only .exe, so
+        # subprocess.run(["codex", ...]) raises FileNotFoundError WinError 2 on
+        # a machine where the which() above just succeeded (measured: Windows 11,
+        # codex-cli 0.146.0). On POSIX which() returns an absolute path too, so
+        # this is one code path, not a platform branch.
+        proc = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=30)
     except Exception as exc:
         say(BAD, f"codex --version failed: {exc}")
         return 1
@@ -359,7 +368,12 @@ def cmd_smoke(home: Path) -> int:
                 capture_output=True, text=True, timeout=300,
             )
         except subprocess.TimeoutExpired:
-            say(BAD, "smoke test did not finish in 300s. Check `pgrep -fl 'codex app-server'` "
+            # There is no pgrep on Windows, and the leftover there is a cmd.exe
+            # shim -> node -> codex.exe chain rather than one process, so the
+            # hint has to name a command that exists on the host it prints on.
+            leftovers = ("Get-Process codex,node -ErrorAction SilentlyContinue"
+                         if os.name == "nt" else "pgrep -fl 'codex app-server'")
+            say(BAD, f"smoke test did not finish in 300s. Check `{leftovers}` "
                      "for leftovers, kill them, then re-run --check.")
             return 1
         final_file = tmp / "FINAL.txt"

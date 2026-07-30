@@ -68,7 +68,17 @@ brief from `git diff` and the commits since the last audit. Your narrative goes
 in as a *hint*, never as the boundary:
 
 ```bash
-LAST=$(python3 - <<'PY'
+PY_BIN=""                                   # resolve the interpreter, do not assume it
+for c in python3 python py; do              # being on PATH is not being able to run
+  command -v "$c" >/dev/null 2>&1 || continue
+  [ "$("$c" -c 'print("PY_OK")' 2>/dev/null)" = "PY_OK" ] && { PY_BIN="$c"; break; }
+done
+
+if [ -z "$PY_BIN" ]; then
+  echo "INTERPRETER MISSING - the scope query did not run."
+  echo "This is NOT 'no previous audit'. Fix the interpreter before scoping."
+else
+LAST=$("$PY_BIN" - <<'PY'
 import json, pathlib
 p = pathlib.Path(".delegate-runs/AUDIT/ledger.jsonl")
 sha = ""
@@ -88,6 +98,7 @@ PY
 echo "${LAST:-(no previous audit - scoping against the whole history)}"
 git diff --stat ${LAST:+$LAST..}HEAD          # what actually changed
 git status --porcelain -uall                   # plus what is still uncommitted
+fi
 ```
 
 **Read that echo before you trust the diff.** Taking `lines[-1]["base_sha"]`
@@ -97,6 +108,18 @@ finding and has no `base_sha`. Measured: the lookup blew up, `LAST` came back
 empty, and the scope silently became "nothing" - an audit that would have run
 against an empty diff. A scope query that fails to a blank instead of an error
 is the dangerous shape; the echo is what makes the blank visible.
+
+**Two unrelated failures print that same blank, and only one of them is
+benign.** Measured (Windows 11): `python3` resolves to the WindowsApps Store
+stub, which prints `Python was not found` and exits `9009` with empty stdout;
+the working interpreter on that machine is `python` (3.13). Piped into the
+heredoc, the stub leaves `LAST` empty and the echo announces *no previous
+audit* on a machine carrying a 106-line ledger - the operator then opens the
+scope to the whole history. "The ledger has no audit line" and "nothing could
+read the ledger" must not produce the same sentence, so the resolution loop
+checks the exact `PY_OK` string rather than `command -v`: the stub is on
+`PATH` and answers, it just cannot run anything. No interpreter is a loud
+branch of its own, never a blank.
 
 A red team told "we added login" looks at login. A red team given the diff finds
 the thing you touched and forgot to mention. That is the whole point of outside
@@ -178,12 +201,32 @@ review lane:
 
 - **`--sandbox workspace-write`, not read-only.** A red team that can only read
   recognises patterns; one that can run the code, write probe scripts and fuzz
-  produces evidence. Measured: subagents inherit this sandbox - a write to
-  `$HOME` was denied at the OS layer while a write inside the lane succeeded, so
-  the worker can take the project apart and still cannot reach outside it.
+  produces evidence. Measured **on macOS seatbelt**: subagents inherit this
+  sandbox - a write to `$HOME` was denied at the OS layer while a write inside
+  the lane succeeded, so the worker can take the project apart and still cannot
+  reach outside it.
 - **Nothing integrates.** The worktree is disposable. Only two things come out:
   the findings files and the probe scripts. So there is no FILE WHITELIST to
   police and no scope-violation check - the lane may do anything to itself.
+
+**Verify containment once per machine - the measurement above is one platform.**
+Windows enforces the sandbox through a different mechanism (the vendor tree
+ships `codex-windows-sandbox-setup.exe`), and whether `workspace-write` actually
+denies a write outside the lane there has never been measured. That containment
+is the whole licence for "the lane may do anything to itself", so establish it
+per machine, and from the outside trace - never from the worker's report, which
+is a claim about a sandbox by the thing being sandboxed:
+
+```bash
+# in the lane brief, one line the worker runs:
+echo escaped > "$HOME/codex-audit-escape-check"
+# from the architect, after the turn:
+ls "$HOME/codex-audit-escape-check" && echo "NOT CONTAINED - lane wrote outside itself"
+rm -f "$HOME/codex-audit-escape-check"        # cleanup is part of the check, not after it
+```
+
+Until that `ls` says no such file on this machine, the isolation claim is
+unmeasured here: say so in the report rather than inheriting the macOS result.
 
 ### Width is what breaks - route by lens count
 
@@ -277,10 +320,12 @@ clear "here is what would settle it" is a real result.
 **Claude's verification, in this order** - cheapest first, and most findings die
 before an agent is involved:
 
-1. **Run the proof.** Exit `1` -> live, continue. Exit `0` -> does not
-   reproduce, the finding is dead. Exit `2` -> the probe is invalid, which is
-   neither: fix the probe or judge the finding by hand, never file it as
-   passed. Free, deterministic, no judgment. This is the bulk of the filtering.
+1. **Run the proof, with the verified shell** (next subsection - an unverified
+   shell makes every rc below meaningless). Exit `1` -> live, continue. Exit
+   `0` -> does not reproduce, the finding is dead. Exit `2` -> the probe is
+   invalid, which is neither: fix the probe or judge the finding by hand, never
+   file it as passed. Free, deterministic, no judgment. This is the bulk of the
+   filtering.
 2. **Re-anchor it.** Open `where` in the live tree. Lanes lag; the line may have
    moved, the code may already be fixed.
 3. **Judge reachability** - this is where Opus subagents earn their cost. The
@@ -295,6 +340,59 @@ before an agent is involved:
 Findings that survive all four are real. Everything else is logged as rejected
 **with a one-line reason**, so it does not come back next audit.
 
+### No probe rc is a verdict until the shell is verified
+
+The launcher can fail before the probe exists, and its failure code collides
+with the contract. Measured (Windows 11): the first `bash` on `PATH` is
+`C:\WINDOWS\system32\bash.exe`, the WSL launcher, with no distribution
+installed. `bash foo.sh` prints
+
+```
+<3>WSL (9 - Relay) ERROR: CreateProcessCommon:800: execvpe(/bin/bash) failed
+```
+
+and exits `1` - the code `references/finding-contract.md` reserves for *the
+flaw reproduces*. Every finding in the run reads as confirmed-live while no
+probe ever ran. `rc=2` does not cover this either: `2` means the probe ran and
+found itself invalid. There is no rc for "the probe did not start", so the
+signal has to come from outside the rc.
+
+**Resolve the shell once per run, before the first probe, and verify it by its
+output rather than its exit code:**
+
+```bash
+BASH_BIN=""
+for c in "$(command -v bash)" "/c/Program Files/Git/bin/bash.exe"; do
+  [ -n "$c" ] && [ "$("$c" -c 'echo PROBE_SHELL_OK' 2>/dev/null)" = "PROBE_SHELL_OK" ] \
+    && { BASH_BIN="$c"; break; }
+done
+[ -n "$BASH_BIN" ] || echo "NO WORKING BASH - probe verdicts unavailable this run"
+echo "probe shell: $BASH_BIN"
+```
+
+The candidate order matters on Windows: PATH first, then Git Bash at
+`C:\Program Files\Git\bin\bash.exe`, which exists on machines where the PATH
+entry is the WSL stub. The handshake string is checked verbatim because the
+stub's rc is indistinguishable from a real finding.
+
+**Contract: until the shell has printed `PROBE_SHELL_OK`, no probe rc is a
+verdict** - not `1`, not `0`, not `2`. A run with no working shell has zero
+probe results, and that is what goes in the report; it is never the same thing
+as a run whose findings all reproduced.
+
+**Then check the second signal on every single probe.** The finding contract
+already requires each probe's first stderr line to be `probe root: <root>` -
+a line the probe body prints itself. **Output with no `probe root:` line means
+the probe never executed** (launcher failure, unreadable file, wrong
+interpreter) and the rc belongs to whatever failed instead. No marker line ->
+"did not run", never a verdict, whatever the number was. This is the check that
+survives a shell which passes the handshake and still cannot run one particular
+script, which is why it is per-probe and the handshake is per-run.
+
+None of this is Windows-specific. Any machine without the interpreter the probes
+were written for, or with a probe file the shell cannot read, produces the same
+`1` from a probe that measured nothing.
+
 ### Closing a finding - green proves only what the probe covers
 
 A fix is proven by the proof flipping red -> green, but that green is exactly
@@ -305,8 +403,10 @@ as wide as the probe. Before closing a confirmed finding:
    echoes back:
 
    ```bash
-   AUDIT_ROOT="$(git rev-parse --show-toplevel)" bash "$LANE/.delegate-runs/$TASK_ID/probes/<name>.sh"
-   # first line of stderr must name the MAIN tree, not the lane
+   AUDIT_ROOT="$(git rev-parse --show-toplevel)" "$BASH_BIN" "$LANE/.delegate-runs/$TASK_ID/probes/<name>.sh"
+   # $BASH_BIN is the shell verified above - never a bare `bash`
+   # first line of stderr must name the MAIN tree, not the lane; if that line is
+   # absent the probe did not run and the rc is not a verdict
    ```
 
    A fix lands in the main tree while the probes live in the lane, so this is
@@ -476,6 +576,19 @@ appended after the audit line, which is always.
   rejected, the demotion reason and named assumption when demoted (§4's
   verification round), the closure variants checked (§4), and the path of the
   test promoted from its probe.
+
+**The ledger is machine-local, and a migration zeroes it silently.**
+`.delegate-runs/` is working product - not gitignored, but never committed by
+design - so it does not travel with the repo. Measured: a machine move left
+106 lines behind, and with them both scalars below (the confirmed/total ratio
+and the recurrence threshold, "same class in three audits") restarted at zero
+with nothing reporting it. §1's fail-to-blank at least has an echo in front of
+it; this has nothing. So when the ledger is missing or empty, resolve the
+ambiguity before trusting it: **ask the operator whether this is a new project
+or a migrated machine.** Migrated -> copy `ledger.jsonl` across before the
+audit; if it cannot be copied, record in this run's audit line that the
+counters restart here, so a later reader does not read a young ratio as a
+measured one.
 
 Two things it buys:
 

@@ -1,7 +1,7 @@
 {
   "name": "codex-delegate",
   "description": "Delegate implementation work to parallel Codex worker lanes, and audit your own code with an outside Codex red team that Claude verifies.",
-  "version": "2.7.0",
+  "version": "2.7.1",
   "author": {
     "name": "Burak Erdemci",
     "url": "https://github.com/BurakErdemci"
