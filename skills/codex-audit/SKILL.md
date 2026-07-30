@@ -232,15 +232,91 @@ Two rules the first Windows run of this probe bought (30 Jul 2026):
   the lane died with `codexErrorInfo: cyberPolicy` right after, taking its
   audit work with it. A line that can kill a lane gets a disposable lane
   whose only job is that line.
-- **An absent file is not yet an OS verdict.** `ls` finding nothing cannot
-  distinguish the OS denying the write from the worker declining to run it.
-  Read the worker's transcript: a refusal means Codex's approval layer
-  answered and the OS layer is STILL unmeasured - that was the Windows
-  outcome. Only an attempted write the OS denies, leaving no file, measures
-  the sandbox.
+- **An absent file is not yet an OS verdict - and the trace says which layer
+  answered.** `ls` finding nothing cannot distinguish the OS denying the write
+  from something upstream declining to run it. dispatch.py logs every approval
+  decision, so the evidence is on disk after the probe turn:
+
+  ```bash
+  grep -n '^\[decline\]' "$LANE/.delegate-runs/$TASK_ID/RAW_OUTPUT.log"
+  # lines read: [decline] <method>: <detail>   (item/commandExecution, requestApproval)
+  ```
+
+  A decline line covering the probe command means the HARNESS answered and the
+  OS layer is STILL unmeasured. No decline line means the write was attempted,
+  and an absent file then convicts the OS/sandbox layer - that is the only
+  shape that measures containment. The worker refusing the line in its own
+  transcript is the same non-verdict as a harness decline.
+
+Measured 30 Jul 2026: **the first Windows containment result was fake.**
+dispatch.py declined approval requests blanket at the time, so the probe never
+reached the sandbox and "contained" was really "the harness said no". It now
+path-scopes the decision - in-lane reads and writes approved, anything naming a
+path outside the lane declined - which means an escape probe is declined **by
+design** and the decline line above is the expected outcome, not a bug. Reading
+the OS layer on Windows therefore needs a probe the harness approves, which the
+current scoping does not offer for a write to `$HOME`.
 
 Until that verdict lands on this machine, the isolation claim is unmeasured
 here: say so in the report rather than inheriting the macOS seatbelt result.
+
+### The provider refusal is topic-shaped, and the brief gate is not the turn
+
+`codexErrorInfo: cyberPolicy` is not a property of a brief you can rewrite your
+way out of. Measured in one Windows audit (30 Jul 2026), three attempts in one
+run on top of 6 refused lanes across earlier runs:
+
+- **`capability`: refused ×2.** The second brief was deliberately reframed into
+  verification mode - "do these two parsers agree", no attack goal, no exploit
+  language - and was refused anyway.
+- **`input-trust`: passed the brief gate, then was killed MID-TURN.** It had
+  done ~270 KB of work when the refusal landed. The trigger was the worker's
+  OWN generated text, not the brief.
+- **`secrets`: not refused.** Its brief named hardlinks, attacker-chosen files
+  and secret exfiltration, and it ran to the end.
+
+Three conclusions, each contradicting a plausible reading of the bullets above:
+
+1. **The refused category is not "security audit".** `secrets` is as red-team
+   as a brief gets and passed. What trips the classifier is topic-shaped:
+   command-gate and shell-parsing material, where the audit text itself reads
+   as an attack recipe.
+2. **Verification-mode reframing is necessary but NOT sufficient.** It is worth
+   one cheap attempt and it is not a fix - budget it as such. After a second
+   refusal, stop and REPORT the pattern to the operator - which lens, how many
+   refusals, what that lens produced in earlier runs - instead of silently
+   spending a third lane. How the lens runs from there (a different executor,
+   by hand, dropped) is the operator's call, not a default this skill makes
+   for them.
+3. **A passed brief gate proves nothing about the rest of the turn.** The kill
+   arrives whenever the worker's own output crosses the line, so lane liveness
+   stays a per-turn check (`codex-delegate` §5) and never a per-brief
+   clearance.
+
+**On a mid-turn kill, read `SALVAGE.txt` before declaring the work lost.**
+dispatch.py writes the last agent message of a failed turn there. Measured:
+three finished findings were sitting in `RAW_OUTPUT.log` when the lane died and
+were recovered by hand - the turn failed, the findings did not. This is also
+why findings are written the moment they exist rather than batched
+(`references/finding-contract.md`): what is already on disk when the kill lands
+needs no salvage at all.
+
+### A lane cannot run the project's toolchain
+
+A worktree carries no `venv` and no `node_modules`, and the sandbox has no
+network (`codex-delegate` §0 makes network a per-task user decision), so the
+worker cannot install what is missing. Measured 30 Jul 2026: the frontend
+lens's probes were structurally unverified - nothing in that lens could be
+executed - while the backend lens got away with it only because the modules it
+audited were stdlib-only. That is luck, not design.
+
+So: **the brief author states, per lens, whether its probes need the project
+toolchain**, and **"runs without dependencies" is a real lens-selection
+criterion**, not a nice-to-have - a lens whose probes cannot execute buys
+`unverified` findings at full lane price. When a lens genuinely needs the
+toolchain, either install it into the lane before dispatch (`codex-delegate`
+§4) or say in the brief that this lens ships static reasoning, and label its
+findings accordingly.
 
 ### Width is what breaks - route by lens count
 
@@ -294,16 +370,26 @@ the aggregation layer:
   section. Missing, empty, or coverage-less -> the turn is incomplete, retry
   that lens. The check reads the disk, never the report.
 - **A lane that returns zero findings is not evidence of a clean lens** until
-  you have read the tail of its `RAW_OUTPUT.log`. A provider-side refusal
-  (`status: failed`, `codexErrorInfo: cyberPolicy`) hit 1 of 4 red-team lanes
-  in the field. dispatch.py now fails the turn on it, but the habit is the
-  backstop.
+  you have read the tail of its `RAW_OUTPUT.log` and the classification line
+  dispatch.py appends to `FINAL.txt`
+  (`--- dispatch: OK|BLOCKED-BY-APPROVALS|REFUSED|TIMEOUT|FAILED ---`). A
+  provider-side refusal (`status: failed`, `codexErrorInfo: cyberPolicy`) hit
+  1 of 4 red-team lanes when that was first measured and is now a recurring
+  pattern on command-gate topics (above). dispatch.py fails the turn on it, and
+  exits `5` for BLOCKED-BY-APPROVALS - a turn that completed with approvals
+  declined, which is a different failure from a refusal and must not be
+  reported as one. The habit of reading the tail is the backstop.
 - **When clearing stale findings before a retry, use
   `find "$LANE/.delegate-runs/$TASK_ID/findings" -name '<lens>.md' -delete`,
   never a shell glob.** zsh (the macOS default) aborts the entire command when
   a glob matches nothing - measured three times in one field audit, and the
   first abort contaminated turn 1. Same trap `codex-delegate` §0.1 documents;
   it bites hardest here because the audit flow cleans `findings/` constantly.
+  **The rule is portable, the command is not:** on PowerShell the equivalent is
+  `Remove-Item "$LANE/.delegate-runs/$TASK_ID/findings/<lens>.md" -ErrorAction
+  SilentlyContinue` - the `-ErrorAction` does `find`'s job of staying quiet on
+  no match. Never let glob expansion decide what a delete touches, whatever the
+  shell.
 
 This is `research-task.md`'s evidence-index rule applied to a fan-out. Nothing
 new is invented; the mechanism already exists in the sibling skill.
@@ -334,8 +420,9 @@ clear "here is what would settle it" is a real result.
 **Claude's verification, in this order** - cheapest first, and most findings die
 before an agent is involved:
 
-1. **Run the proof, with the verified shell** (next subsection - an unverified
-   shell makes every rc below meaningless). Exit `1` -> live, continue. Exit
+1. **Run the proof, with the verified runner** (next two subsections - an
+   unverified runner makes every rc below meaningless). Exit `1` -> live,
+   continue. Exit
    `0` -> does not reproduce, the finding is dead. Exit `2` -> the probe is
    invalid, which is neither: fix the probe or judge the finding by hand, never
    file it as passed. Free, deterministic, no judgment. This is the bulk of the
@@ -407,6 +494,31 @@ None of this is Windows-specific. Any machine without the interpreter the probes
 were written for, or with a probe file the shell cannot read, produces the same
 `1` from a probe that measured nothing.
 
+### The probe CONTRACT is binding; the probe LANGUAGE is not
+
+What every probe owes is fixed and lives in `references/finding-contract.md`:
+takes no arguments, prints `probe root: <root>` as its first line, exits `1`
+live / `0` dead / `2` blocked-or-inconclusive, and measures behaviour rather
+than source text. The file extension is not part of that contract - it only
+picks the runner:
+
+| extension | runner |
+|---|---|
+| `.sh` | `$BASH_BIN` - the shell verified by the handshake above |
+| `.py` | `$PY_BIN` - the interpreter resolved by §1's `PY_OK` handshake (same loop as `codex-delegate` §3) |
+
+Measured 30 Jul 2026: `bash` on the field machine was the WSL launcher stub
+while the audited code was Python. A `.sh`-only convention made every probe
+unrunnable on a project that could have proved itself in one `python` call, and
+the operator hand-allowed `.py` probes mid-run. So say in the brief which
+language the machine can actually run, and let the worker write probes in it.
+
+Two things do not relax with the language. The runner handshake is per-runner:
+until `$PY_BIN` has printed `PY_OK`, a `.py` probe's rc is no more a verdict
+than a `.sh` probe's is without `PROBE_SHELL_OK`. And a probe that cannot run
+because its dependency is absent (§3 - lanes carry no toolchain) exits `2`,
+never `1`: "I could not measure" is the third code's whole purpose.
+
 ### Closing a finding - green proves only what the probe covers
 
 A fix is proven by the proof flipping red -> green, but that green is exactly
@@ -419,6 +531,7 @@ as wide as the probe. Before closing a confirmed finding:
    ```bash
    AUDIT_ROOT="$(git rev-parse --show-toplevel)" "$BASH_BIN" "$LANE/.delegate-runs/$TASK_ID/probes/<name>.sh"
    # $BASH_BIN is the shell verified above - never a bare `bash`
+   # a .py probe runs the same way under "$PY_BIN": runner by extension, verdict rules unchanged
    # first line of stderr must name the MAIN tree, not the lane; if that line is
    # absent the probe did not run and the rc is not a verdict
    ```
@@ -599,7 +712,13 @@ and the recurrence threshold, "same class in three audits") restarted at zero
 with nothing reporting it. §1's fail-to-blank at least has an echo in front of
 it; this has nothing. So when the ledger is missing or empty, resolve the
 ambiguity before trusting it: **ask the operator whether this is a new project
-or a migrated machine.** Migrated -> copy `ledger.jsonl` across before the
+or a migrated machine - but weigh the evidence first, and bring it to the
+question.** `git log --oneline | wc -l` costs nothing and usually settles it:
+a repo with deep history and no ledger is far likelier migrated than new
+(measured 30 Jul 2026: 71 commits, zero ledger lines, and it was a machine
+move). Asking cold substitutes the operator's memory for a two-second
+measurement, and a question that already carries its evidence gets a sharper
+answer. Migrated -> copy `ledger.jsonl` across before the
 audit; if it cannot be copied, record in this run's audit line that the
 counters restart here, so a later reader does not read a young ratio as a
 measured one.

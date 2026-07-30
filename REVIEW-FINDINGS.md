@@ -1125,3 +1125,52 @@ protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
    soktuğunu avla, dikiş yerlerini kontrol et — az kod okuyan worker boşluğu
    spekülasyonla doldurmasın diye "düzeltme tutuyorsa bu gerçek bir sonuçtur"
    açıkça yazıldı.
+
+---
+
+# Saha koşusu geri bildirimi #6 — 30 Tem 2026 (v2.7.2 koşusu, Windows 11 sahası)
+
+1. **cyberPolicy artık tekil bir arıza değil, ölçülmüş tekrar eden bir örüntü.**
+   Önceki turlarda 6 lane, bu turda 3 deneme reddedildi. Dağılım rastgele
+   değil: `capability` iki kez reddedildi — ikinci brief kasten doğrulama
+   kipine çevrildiği ("iki parser aynı fikirde mi", saldırı hedefi yok) halde;
+   `input-trust` brief kapısını geçti, ~270 KB iş yaptı ve TUR ORTASINDA
+   öldürüldü — tetikleyici worker'ın kendi ürettiği metindi, brief değil;
+   `secrets` ise hardlink, saldırgan-seçimli dosya ve sır sızdırma içeren
+   brief'iyle hiç reddedilmedi. Reddedilen kategori "güvenlik denetimi"
+   değil, konu biçimli: komut kapısı + kabuk ayrıştırma içeriği tetikliyor.
+   Skill'e giren (codex-audit §3): yeniden çerçeveleme gereklidir ama YETERLİ
+   DEĞİLDİR; geçilmiş bir brief kapısı turun kalanı hakkında hiçbir şey
+   kanıtlamaz; tur ortası ölümde iş kayıp ilan edilmeden önce `SALVAGE.txt`
+   okunur — bu koşuda üç bitmiş bulgu `RAW_OUTPUT.log`'dan elle kurtarıldı.
+
+   **Maliyet tarafı, örüntüyü ciddi kılan şey:** reddedilen iki lens hem
+   koşunun en yüksek değerli lensleri, hem de daha önceki koşularda gerçek
+   bulgu üretmiş olanlar — biri HIGH. Kaybedilen "denenmemiş bir lens" değil,
+   üretkenliği ölçülmüş bir lens.
+
+   **CANDIDATE — REDDEDİLDİ (operatör kararı, 30 Tem 2026):** "komut-kapısı
+   biçimli bir lens varsayılan olarak Codex dışı bir yürütücüye gider; ona
+   Codex lane'i harcanmaz." Gerekçe: public bir skill'e yürütücü seçen bir
+   varsayılan koymak fazla — her kurulumun elindeki alternatif yürütücüler
+   farklı, skill bilemez. Onun yerine §3 artık şunu söylüyor: ikinci retten
+   sonra dur ve örüntüyü operatöre BİLDİR (hangi lens, kaç ret, o lens daha
+   önce ne üretmişti); lens oradan nasıl koşar — başka yürütücü, elle, iptal —
+   operatörün kararıdır. Ölçüm kaydı yukarıda duruyor; örüntü yeniden
+   eşik aşarsa bu karar da yeniden açılabilir.
+
+2. **Aynı koşunun diğer doküman bulguları**, hepsi bu turda kapatıldı:
+   `python3`'ün Windows'ta Microsoft Store saplaması olması (`command -v`
+   geçiyor, çalışan Python yok — v2.7.1 yalnız kapsam sorgusunu korumuştu,
+   setup ve dispatch çıplak kalmıştı → codex-delegate §3'te tek seferlik
+   `PY_BIN` el sıkışması); preflight'ın `.gitignore`'a kendiliğinden yazması
+   (operatörün bilerek temiz tuttuğu ağaca dördüncü bir incelenmemiş
+   değişiklik sokuyordu → rapor et ve dur); lane'lerin proje araç zincirini
+   koşamaması (venv/node_modules yok, ağ yok — frontend lens'inin probe'ları
+   yapısal olarak doğrulanamadı, backend lens'i yalnız stdlib olduğu için
+   şanslıydı → "bağımlılıksız koşar" artık lens seçim ölçütü); probe dilinin
+   `.sh`'ye çivilenmiş olması (sahada bash bozuktu, kod Python'du → sözleşme
+   bağlayıcı, dil serbest, çalıştırıcı uzantıdan); ve containment probe'unun
+   yanıltıcı sonucu (dispatch.py'nin toptan reddi probe'u engellemişti,
+   "contained" aslında "harness hayır dedi"ydi → RAW_OUTPUT.log'daki
+   `[decline]` satırı hangi katmanın cevapladığının kanıtı).

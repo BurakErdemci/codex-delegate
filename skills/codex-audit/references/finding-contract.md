@@ -9,7 +9,7 @@ writes and the format Claude verifies against.
 
 ```
 .delegate-runs/<task-id>/findings/<lens>.md      one file per lens
-.delegate-runs/<task-id>/probes/<name>.sh        one runnable proof per finding
+.delegate-runs/<task-id>/probes/<name>.<ext>     one runnable proof per finding
 ```
 
 Your final message follows the worker contract exactly: **six lines, nothing
@@ -24,6 +24,16 @@ competing final-message format followed neither and wrote prose - prose that
 contained an invented causal claim. The filesystem has neither failure mode:
 a file either exists and is non-empty or it does not, and that is checkable.
 
+**Write each finding to its file the moment it exists - never batch them for
+the end of the turn.** The end of the turn is for the summary line, not for the
+first write. "Files survive an aggregation failure" understates the reason:
+measured 30 Jul 2026, a provider refusal killed a turn mid-run, *before* the
+worker's first write, and three finished findings died with it - they were
+recovered by hand from the raw transcript afterwards. A file that does not
+exist yet survives nothing. So the loop is: finding found -> finding appended
+to its lens file -> next surface. Only the `## Coverage` section and the
+changelog's `files:` list are allowed to wait for the end.
+
 **Every lens named in your brief must end with a non-empty findings file.** A
 lens that found nothing writes the file with `findings: 0` and one line saying
 what it looked for. A missing file is an incomplete turn, not a clean lens.
@@ -32,9 +42,18 @@ what it looked for. A missing file is an incomplete turn, not a clean lens.
 
 **A finding without a runnable proof is a hypothesis, not a vulnerability.**
 
-`probes/<name>.sh` must be self-contained, take no arguments, exit non-zero on
-the current code, and be something that would exit zero once the flaw is fixed.
-Red now, green after. That is the whole test.
+`probes/<name>.<ext>` must be self-contained, take no arguments, exit non-zero
+on the current code, and be something that would exit zero once the flaw is
+fixed. Red now, green after. That is the whole test.
+
+**That contract is binding; the language is not.** Write the probe in whatever
+this machine can actually run - `.sh` and `.py` are both first-class, and the
+extension only picks the runner (a verified bash, or the verified interpreter).
+Every rule in this file applies identically to both. Measured 30 Jul 2026: the
+first `bash` on the field machine was a WSL launcher stub with no distribution
+installed while the code under audit was Python, so a `.sh`-only convention
+would have ended the run with zero evidence. If the brief names a language for
+this project, use that one.
 
 **Measure behaviour, not source text.** Call the function, start the process,
 send the request, import the module and assert what it does. A probe that
@@ -54,6 +73,17 @@ ROOT="${AUDIT_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null)}"
 echo "probe root: $ROOT" >&2                    # first line of output, always
 [ -n "$ROOT" ] && [ -e "$ROOT/<the file or entry point this probe needs>" ] || {
   echo "probe invalid: cannot locate target under root '$ROOT'" >&2; exit 2; }
+```
+
+Same three moves in the same order in a `.py` probe - resolve, print, guard:
+
+```python
+root = os.environ.get("AUDIT_ROOT") or subprocess.run(
+    ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+print(f"probe root: {root}", file=sys.stderr, flush=True)   # first line of output, always
+if not root or not os.path.exists(os.path.join(root, "<target>")):
+    print(f"probe invalid: cannot locate target under root '{root}'", file=sys.stderr)
+    sys.exit(2)
 ```
 
 That guard is not boilerplate. Written without it - the first draft of this
@@ -129,7 +159,7 @@ it" is worth more than a guess dressed as a measurement.
 
 class:      <kebab-case type>            # e.g. missing-owner-check
 where:      <path>:<line>
-proof:      probes/<name>.sh | n/a (hygiene)
+proof:      probes/<name>.<ext> | n/a (hygiene)
 reachable:  <who can trigger this, through which entry point>
 severity:   high | med | low
 confidence: verified-empirically | partially-verified | unverified
@@ -139,7 +169,7 @@ confidence: verified-empirically | partially-verified | unverified
 **How it fails:** concrete inputs or state -> the wrong outcome. Not "could be
 exploited" - the actual sequence.
 
-**Proof:** what probes/<name>.sh does and what it prints when it fails.
+**Proof:** what probes/<name>.<ext> does and what it prints when it fails.
 ```
 
 Field notes:

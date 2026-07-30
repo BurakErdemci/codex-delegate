@@ -75,7 +75,8 @@ Two measured corrections live in that command, both silent when wrong:
   (`plugins/cache/<plugin>/<plugin>/<version>/skills/codex-delegate/scripts/`) -
   the version segment adds one, and the earlier `-maxdepth 7` returned
   **nothing**. An empty `SKILL_DIR` then fails downstream as
-  `python3 "/scripts/doctor.py"`, which is why the `:?` guard is not decoration.
+  `"$PY_BIN" "/scripts/doctor.py"`, which is why the `:?` guard is not
+  decoration.
 - **`sort -V | tail -1` instead of `-print -quit`.** The cache keeps one
   directory per installed version, and `-quit` takes whichever the filesystem
   hands over first - reproduced here: with 2.4.0 and 2.5.0 both present it
@@ -108,7 +109,9 @@ a glob matches nothing. `find` has no such behaviour.
   is worse than none.
 
 **Python 3.11+ is required**: both scripts import `tomllib`. Stock macOS
-`/usr/bin/python3` is 3.9 and dies at the import line.
+`/usr/bin/python3` is 3.9 and dies at the import line. Which command provides
+that interpreter is never assumable either - §3 resolves `PY_BIN` by handshake
+once per session, and every script call in this protocol goes through it.
 
 ## 1. Scope of action
 
@@ -154,11 +157,38 @@ Run from the repository root (`git rev-parse --show-toplevel`). Everything in
 this protocol is repo-root relative.
 
 ```bash
-python3 "$SKILL_DIR/scripts/doctor.py" --check
+PY_BIN=""                                   # resolve the interpreter, do not assume it
+for c in python3 python py; do              # being on PATH is not being able to run
+  command -v "$c" >/dev/null 2>&1 || continue
+  [ "$("$c" -c 'print("PY_OK")' 2>/dev/null)" = "PY_OK" ] && { PY_BIN="$c"; break; }
+done
+[ -n "$PY_BIN" ] || echo "BLOCK: no runnable Python - setup, dispatch and doctor all need one"
+
+"$PY_BIN" "$SKILL_DIR/scripts/doctor.py" --check
 BASE_SHA=$(git rev-parse HEAD)                  # every lane pins to this
-git check-ignore -q .delegate-runs || echo '.delegate-runs/' >> .gitignore
+git check-ignore -q .delegate-runs || echo "BLOCK: .delegate-runs/ is not git-ignored - add it (one line in .gitignore) before opening lanes"
 git worktree list                               # stale lanes from dead sessions?
 ```
+
+**Resolve `PY_BIN` once, here, and use it at every script call site below**
+(§4's `--trust`, §5's dispatch). Like `SKILL_DIR` it is session state, not a
+per-command lookup. **Resolution is by OUTPUT, never by `command -v`** -
+measured (Windows 11, 30 Jul 2026): `python3` is the Microsoft Store stub,
+which sits *on* `PATH`, prints nothing to stdout and exits `9009`; there is no
+Python behind it. The working interpreter on that machine was `python` (3.13).
+`command -v python3` succeeds there and proves nothing, so the loop demands the
+literal `PY_OK` string back. Same measurement bought codex-audit §1's handshake
+in v2.7.1 - that fix covered the scope query only, and these three call sites
+stayed bare: **the scope query survived the field run, setup and dispatch did
+not.**
+
+**The `.gitignore` line reports; it does not fix.** An earlier version appended
+`.delegate-runs/` to `.gitignore` itself. Measured 30 Jul 2026: the operator's
+tree was deliberately clean and awaiting push, and that append would have
+slipped a fourth unreviewed change into the pending commit set. A tool must not
+edit the repository it is about to open lanes in - the user's diff is theirs,
+and a one-line `.gitignore` edit they chose to make costs them nothing while one
+they discover later costs them the whole review.
 
 `--check` proves structure, login, config parse and the CLI version floor. It
 does not prove the configured model is available to your account - that needs
@@ -182,7 +212,7 @@ TASK_ID=$(date +%F)-<shortname>                    # e.g. 2026-07-26-inventory-u
 LANE="$(dirname "$PWD")/$(basename "$PWD")-lanes/$TASK_ID"
 git worktree add --detach "$LANE" "$BASE_SHA"
 test "$(git -C "$LANE" rev-parse HEAD)" = "$BASE_SHA" || echo "BLOCK: lane not at BASE_SHA"
-python3 "$SKILL_DIR/scripts/doctor.py" --trust "$LANE"
+"$PY_BIN" "$SKILL_DIR/scripts/doctor.py" --trust "$LANE"
 mkdir -p "$LANE/.delegate-runs/$TASK_ID"
 ```
 
@@ -267,7 +297,7 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
 ## 5. Dispatch
 
 ```bash
-python3 "$SKILL_DIR/scripts/dispatch.py" \
+"$PY_BIN" "$SKILL_DIR/scripts/dispatch.py" \
   --task-dir "$LANE/.delegate-runs/$TASK_ID" \
   --repo "$LANE" \
   --prompt-file "$LANE/.delegate-runs/$TASK_ID/PROMPT.txt" \

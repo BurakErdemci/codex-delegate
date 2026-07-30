@@ -177,6 +177,12 @@ conversation. Per lens, state: the lens name, what it looks for, the findings
 file path, the finding format (`references/finding-contract.md` verbatim), the
 threat-model summary, and where today's changes are.
 
+**And state per lens whether its probes need the project toolchain.** A lane
+carries no `venv`, no `node_modules` and no network, so nothing missing can be
+installed - a lens whose probes cannot execute returns `unverified` findings at
+full lane price (SKILL.md §3, measured 30 Jul 2026). "Runs without
+dependencies" is therefore a lens-selection criterion, not a nice-to-have.
+
 And state the two things that are easy to leave implicit:
 
 > Report a finding only with a runnable proof under `probes/`. If you cannot
@@ -194,6 +200,10 @@ And state the two things that are easy to leave implicit:
 > Probes exit `1` when the flaw reproduces, `0` when it does not, and `2` when
 > the probe itself no longer applies - print one line to stderr saying what
 > stopped applying before exiting `2`.
+
+> Write probes in the language named in this brief - `.sh` and `.py` are both
+> first-class and the extension only picks the runner. Every rule above applies
+> unchanged either way.
 
 > A probe must exercise behaviour - call the function, start the process, send
 > the request. Grepping the source for a pattern is not a proof: it tracks the
