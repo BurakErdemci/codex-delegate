@@ -1174,3 +1174,36 @@ protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
    yanıltıcı sonucu (dispatch.py'nin toptan reddi probe'u engellemişti,
    "contained" aslında "harness hayır dedi"ydi → RAW_OUTPUT.log'daki
    `[decline]` satırı hangi katmanın cevapladığının kanıtı).
+
+---
+
+# Saha koşusu geri bildirimi #7 — 31 Tem 2026 (v2.7.3 koşusu → v2.7.4)
+
+1. **argv[0] onay kuralını gölgeliyordu — yol-kapsamlı onayın ilk saha günü
+   sıfır onayla bitti.** Ölçüm: 8 dispatch, 74 onay reddi, 0 onaylanan komut,
+   0 cyberPolicy, 0 diske yazılan bulgu dosyası — 8/8 `BLOCKED-BY-APPROVALS`.
+   Kök sebep saf fonksiyona gerçek yükler geri verilerek bulundu: Codex her
+   komutu `powershell.exe -Command ...` diye sarıyor ve token döngüsü
+   `tokens[0]`'ı — yorumlayıcının kendi mutlak yolunu — "lane dışı yol" diye
+   reddediyordu. Daha kötüsü, gerçekten kaçan bir yazma da YANLIŞ sebeple
+   reddedildi; asıl containment kuralının dişleri hiç ölçülmemişti. Düzeltme:
+   döngü `tokens[1:]` — argv[0] program, işlenen değil; muafiyet containment
+   kaybı değil (worker onaylı bir kabuk üzerinden her çalıştırılabilire zaten
+   ulaşıyor, bu tarama bir yazma-kapsama vekili). 9 vakalık bağımsız probe +
+   önceki turun 21 testi yamadan sonra da geçiyor.
+
+2. **`[decline]` satırı sebep yazmıyordu — kök sebep log'dan okunamadı,**
+   fonksiyon elle yeniden çalıştırılarak bulundu. Satır artık
+   `[decline] {method}: {reason}: {payload}` — codex-audit §3'ün grep'lediği
+   önek korunuyor, sebep araya giriyor.
+
+3. **"Diske yazamazsan FINAL'de raporla" cümlesi skill'e kalıcılaştırıldı**
+   (finding-contract.md). Ölçüm: 8 kilitli turda 21 gerçek bulgu — yeniden
+   ölçümde 21/21 doğrulandı, ikisi ürünü kullanılamaz yapacak düzeyde — yalnız
+   SPEC'e elle eklenmiş bu cümle sayesinde yaşadı; cümlenin olmadığı önceki
+   gün aynı engel sıfır çıktıyla bitmişti. Kural koşullu: yazma reddedilirken
+   bulgular tam biçimiyle FINAL'e gider; altı-satır sözleşmesi kurtarmaya
+   boyun eğer.
+
+   Bilinen zayıflık sürüyor (bilerek): `/PID` gibi slash-bayraklar hâlâ mutlak
+   yol sanılıp reddediliyor — muhafazakâr yön, rc=5 görünür kılıyor.

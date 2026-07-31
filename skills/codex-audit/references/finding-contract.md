@@ -38,6 +38,18 @@ changelog's `files:` list are allowed to wait for the end.
 lens that found nothing writes the file with `findings: 0` and one line saying
 what it looked for. A missing file is an incomplete turn, not a clean lens.
 
+**One exception, and it is the disk itself: if your write commands are being
+declined by the harness, the no-findings-in-final rule inverts.** Put every
+finding - full format below, not a summary - into your final message, and say
+there that you did so because writes were blocked. Measured 31 Jul 2026: eight
+consecutive turns had every command declined (74 declines, 0 approvals), zero
+findings files existed on disk, and 21 real findings - all 21 confirmed on
+re-measurement, two of them product-breaking - survived only because the brief
+carried this instruction. Without it, all eight turns end with nothing, which
+is exactly what happened the day before it was added. A blocked write is the
+one case where the filesystem has the worse failure mode; the six-line final
+contract yields to salvage.
+
 ## The one hard rule
 
 **A finding without a runnable proof is a hypothesis, not a vulnerability.**

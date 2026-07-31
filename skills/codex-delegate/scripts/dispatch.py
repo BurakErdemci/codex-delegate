@@ -189,7 +189,16 @@ def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, 
         # judged too, not just the outer argv.
         tokens = (command.split() if isinstance(command, str)
                   else [tok for element in command for tok in str(element).split()])
-        for token in tokens:
+        # argv[0] is the PROGRAM, not an operand - every interpreter lives
+        # outside the lane by definition. Judging it under the containment
+        # rule declined every shell-wrapped command Codex issued (measured
+        # 31 Jul 2026: 8/8 rounds BLOCKED-BY-APPROVALS, 74 declines, 0
+        # approvals) and shadowed the real rule: a genuine escaping write was
+        # declined for the WRONG reason. Exempting it loses no containment -
+        # the same worker reaches any executable through an approved shell
+        # anyway; this lexical scan is a write-containment proxy, not a
+        # sandbox.
+        for token in tokens[1:]:
             reason = _token_verdict(token, lane_root, cwd_abs)
             if reason:
                 return "decline", reason
@@ -407,11 +416,14 @@ class AppServer:
                 self.log.write(f"[approve] {method}: {reason}: {json.dumps(params)[:200]}\n")
             else:
                 self.declined += 1
-                # This exact line format is load-bearing: the audit skill's
-                # containment protocol greps RAW_OUTPUT.log for
+                # The "[decline] {method}:" prefix is load-bearing: the audit
+                # skill's containment protocol greps RAW_OUTPUT.log for
                 # "[decline] item/commandExecution/requestApproval" as proof
-                # the harness, not the OS, answered. Do not reword it.
-                self.log.write(f"[decline] {method}: {json.dumps(params)[:400]}\n")
+                # the harness, not the OS, answered. Do not reword the prefix.
+                # The reason rides along because without it the argv[0] bug
+                # could not be diagnosed from the log - the function had to be
+                # re-run by hand against captured payloads.
+                self.log.write(f"[decline] {method}: {reason}: {json.dumps(params)[:400]}\n")
             self.send({"id": rid, "result": {"decision": decision}})
         elif method == "item/tool/requestUserInput":
             # 0.145 expects an answer map keyed by question id:
