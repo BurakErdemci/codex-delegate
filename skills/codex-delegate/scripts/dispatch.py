@@ -146,6 +146,26 @@ def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     return None
 
 
+def enrich_file_change(params: dict, items_by_id: dict) -> dict:
+    """Graft the cached fileChange item onto a path-less approval payload.
+
+    0.145's fileChange approval names only the itemId - the changed paths
+    travelled EARLIER, in the item/started notification. Measured 31 Jul 2026
+    (audit-k1c line 1509 vs 1511): an in-lane findings write arrived as
+    {"itemId": ..., "reason": null, "grantRoot": null} and was declined
+    "unrecognized approval payload" while its full path list sat one
+    notification up in the same log. Every findings/probes write in 9 field
+    rounds died this way. If no cached item exists the payload is returned
+    untouched and the conservative decline stands.
+    """
+    if _collect_paths(params):
+        return params
+    item = items_by_id.get(str(params.get("itemId") or ""))
+    if isinstance(item, dict):
+        return {**params, "item": item}
+    return params
+
+
 def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, str]:
     """Windows decision for one sandbox approval: ("approve"|"decline", reason).
 
@@ -330,6 +350,10 @@ class AppServer:
         # the worker was starved" (see approval_decision and main()).
         self.lane_root = Path(cwd)
         self.declined = 0
+        # fileChange approvals reference paths by itemId only; the items
+        # themselves stream past earlier as notifications (see
+        # enrich_file_change). One turn holds a handful of these.
+        self.file_changes: dict[str, dict] = {}
         # read() blocks in readline() with no deadline of its own, so a wall
         # clock check in the caller's loop can never fire while the worker is
         # silent. Kill the process from a timer instead; readline() then returns
@@ -405,6 +429,8 @@ class AppServer:
                 # NOT escape attempts - Codex asks for anything it cannot prove
                 # safe, and blanket decline starved two lanes to zero artifacts
                 # (see the approval-decision block above for the measurement).
+                if method == "item/fileChange/requestApproval":
+                    params = enrich_file_change(params, self.file_changes)
                 decision, reason = approval_decision(method, params, self.lane_root)
             else:
                 # The POSIX sandbox already filtered workspace writes; a
@@ -447,6 +473,12 @@ class AppServer:
             self.send({"id": rid, "result": {}})
 
     def note(self, method: str, params: dict[str, Any]) -> None:
+        # Capture fileChange items on the way past - their approval request
+        # arrives later carrying only the itemId (see enrich_file_change).
+        if method in ("item/started", "item/updated"):
+            item = params.get("item") or {}
+            if item.get("type") == "fileChange" and item.get("id"):
+                self.file_changes[str(item["id"])] = item
         if method == "item/completed":
             item = params.get("item") or {}
             if item.get("type") == "agentMessage":

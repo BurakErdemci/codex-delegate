@@ -1207,3 +1207,39 @@ protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
 
    Bilinen zayıflık sürüyor (bilerek): `/PID` gibi slash-bayraklar hâlâ mutlak
    yol sanılıp reddediliyor — muhafazakâr yön, rc=5 görünür kılıyor.
+
+---
+
+# Saha koşusu geri bildirimi #8 — 1 Ağu 2026 (9 tur "v2.7.4'le de engelleniyor" raporu → v2.7.5)
+
+0. **Önce zaman çizgisi düzeltmesi:** rapor "v2.7.4 kurulu ve turlar hâlâ
+   engelleniyor" diyordu; loglardan ölçüldü — 9 turun 9'u da 2.7.3'le koşmuş
+   (en yeni tur 18:26, v2.7.4 push+kurulum 21:13; RAW loglu 4 turun 4'ünde de
+   `[decline]` satırı eski sebep-siz biçimde). Yani argv[0] yaması sahada hiç
+   sınanmadı. Ama rapor yine de ikinci, gerçek bir engel ortaya çıkardı:
+
+1. **fileChange onayı yol taşımıyor — lane İÇİ bulgu yazmaları "unrecognized
+   payload" ile ölüyordu.** Ölçüm (audit-k1c, satır 1509/1511): yollar onay
+   isteğinde değil, ondan önceki `item/started` bildiriminde geliyor; onay
+   yükü yalnız `itemId` + `reason: null` + `grantRoot: null`. `_collect_paths`
+   boş dönünce muhafazakâr ret ateşleniyordu — hedef `~\ual\k1c\.delegate-runs\
+   ...\findings\` yani lane'in tam içiyken. 9 turda diske sıfır bulgu
+   dosyasının asıl sebebi bu (argv[0] komutları öldürüyordu, bu da yazmaları).
+   Düzeltme: dispatch fileChange item'larını `item/started`/`item/updated`'da
+   id'siyle önbelleğe alıyor; yol-suz onay isteği `enrich_file_change` (saf,
+   test edilebilir) ile zenginleşip aynı yol-kapsama kuralından geçiyor.
+   Önbellekte yoksa muhafazakâr ret aynen duruyor. 5 vakalık probe (birebir
+   saha yükü dahil) + önceki 9 + 21 test geçiyor.
+
+2. **`confidence: verified` etiket enflasyonu:** tüm komutları reddedilen bir
+   tur, "source and call-path inspection" gerekçesiyle `verified` yazdı.
+   finding-contract.md'ye eklendi: `verified-empirically` probe'un bu koşuda
+   çalışıp hüküm bastığı anlamına gelir; kaynak okuması en fazla
+   `partially-verified`, hiçbir şey koşmadıysa `unverified`; üç etiket dışı
+   değer kabulden düşer.
+
+3. **Taşınabilirlik taraması (kullanıcı sorusu üzerine):** skills/, commands/,
+   scripts/, README tamamen İngilizce ve makine-bağımsız çıktı (ripgrep,
+   büyük/küçük harf duyarlı — PowerShell'in duyarsız eşleşmesi Türkçe `ı`'yı
+   her "i"yle eşleştirip yanlış alarm veriyor). Türkçe içerik yalnız bu
+   defter dosyasında; çalışma yoluna girmiyor.

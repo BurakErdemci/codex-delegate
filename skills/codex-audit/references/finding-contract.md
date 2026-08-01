@@ -164,6 +164,14 @@ most findings do not reproduce gets the whole audit ignored.
 to look thorough - a clear "unverified, here is the command that would settle
 it" is worth more than a guess dressed as a measurement.
 
+`verified-empirically` means the probe EXECUTED this run and printed its
+verdict. Source reading, call-path tracing, "inspection" - however careful -
+is `partially-verified` at most, and if nothing ran it is `unverified`.
+Measured 31 Jul 2026: a turn whose every command was declined still labelled a
+finding verified with rationale "source and call-path inspection" - a label
+the verifier then has to distrust across the whole report. The three labels in
+the format block are the only valid values; anything else fails acceptance.
+
 ## Finding format
 
 ```markdown
