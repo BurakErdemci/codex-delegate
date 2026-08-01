@@ -1243,3 +1243,42 @@ protokolüyle koşacaktı. Düzeltme: `sort -V | tail -1`.
    büyük/küçük harf duyarlı — PowerShell'in duyarsız eşleşmesi Türkçe `ı`'yı
    her "i"yle eşleştirip yanlış alarm veriyor). Türkçe içerik yalnız bu
    defter dosyasında; çalışma yoluna girmiyor.
+
+---
+
+# Saha koşusu geri bildirimi #9 — 1 Ağu 2026 (2.7.4↔2.7.5 A/B raporu → v2.7.6, İLK YEŞİL TUR)
+
+Kullanıcının A/B ölçümü (aynı lane, aynı SPEC, tek değişken dispatch sürümü)
+iki iddia getirdi; biri loglarla doğrulandı, biri çürütüldü, ve peşinden gelen
+smoke turu üç sürümdür görünmeyen asıl kök sebebi çıkardı.
+
+1. **Çürütülen iddia — "fileChange önbelleği tip-dar":** gösterilen
+   `exec-ecc0c36a` yükü 2.7.4 logundandı (`item/started` tipi zaten
+   `fileChange`, önbellek 2.7.5'te eklendi); 2.7.5 turunun kendi logunda
+   **sıfır** fileChange reddi var. Önbellek sahada tam çalıştı.
+
+2. **Doğrulanan iddia — token yanlış-pozitifleri:** PowerShell `-Command`
+   stringlerinde iç tırnaklar kaçışlı geldiği için `\"import`, `\"from` ve
+   `\"`-önekli regex alternasyonları baştaki `\` yüzünden köklü yol sanılıp
+   reddedildi; Python'un `ROOT / 'x'` bölme operatörü de çıplak `/` token'ı
+   olarak kök dizin sanıldı. Bu, koşunun bütün Python probe'larını engelledi.
+   Düzeltme `_token_verdict` başında: kaçış çözülür (`\"`→`"`, `\'`→`'`),
+   yalnız ayraçtan oluşan token atlanır. 9 vakalık probe birebir saha
+   komutlarıyla; gerçek kaçışlar (kaçışlı tırnak İÇİNDEKİ mutlak yol, $env:TEMP,
+   ~, UNC) reddedilmeye devam ediyor.
+
+3. **Asıl kök sebep, smoke turunun çıkardığı — onay cevabı Codex'e hiç
+   ulaşmıyordu.** Token düzeltmesinden sonraki ilk gerçek codex turu 3 onay /
+   0 ret logladı ama diske hiçbir şey yazılmadı; codex stderr'i kanıtı verdi:
+   `unknown variant 'approved', expected one of 'accept', 'acceptForSession',
+   'acceptWithExecpolicyAmendment', 'applyNetworkPolicyAmendment', 'decline',
+   'cancel'`. Bizim `{"decision": "approve"}` cevabımız 0.146'nın
+   `ReviewDecision`'ında geçersiz varyant — deserializasyon düşünce router
+   `approval request failed` deyip aracı öldürüyor, log ise "onaylandı"
+   gösteriyor. `"decline"` değeri baştan beri geçerliydi; redlerin hep
+   işlemesinin sebebi buymuş. Düzeltme: tel çevirisi `approve → accept`.
+
+   **GREEN kanıtı (bu depoda ilk):** üçüncü smoke turu — worker
+   `findings/smoke.md`'ye `SMOKE-OK` yazdı (diskte doğrulandı), `python -c`
+   koşturup `PY-OK 3` döndürdü, 1 onay / 0 ret / 0 router hatası / exit 0.
+   Windows'ta bir dispatch turu ilk kez uçtan uca temiz tamamlandı.

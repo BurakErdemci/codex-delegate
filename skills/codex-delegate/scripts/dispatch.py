@@ -120,8 +120,20 @@ def _collect_paths(node: Any) -> list[str]:
 
 def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     """Reason to decline this argv token, or None if it is lane-safe."""
+    # PowerShell -Command strings arrive with their inner quotes escaped, so a
+    # quoted word shows up as '\"import' - the leading backslash then reads as
+    # a rooted path below. Unescape first so the wrap-strip can do its job.
+    # Measured 1 Aug 2026 (k3-acl): \"import, \"from and a \"-prefixed regex
+    # alternation were all declined "absolute path outside lane", which blocked
+    # every Python probe of the run.
+    token = token.replace('\\"', '"').replace("\\'", "'")
     token = token.strip(_TOKEN_WRAP)
     if not token:
+        return None
+    # A bare separator is an operator, not a path operand: Python's
+    # `ROOT / 'x'` Path division put a lone '/' in the token stream and it was
+    # declined as the filesystem root (same run as above).
+    if token.strip("/\\") == "":
         return None
     upper = token.upper()
     if (token == "~" or token.startswith(("~/", "~\\"))
@@ -450,7 +462,18 @@ class AppServer:
                 # could not be diagnosed from the log - the function had to be
                 # re-run by hand against captured payloads.
                 self.log.write(f"[decline] {method}: {reason}: {json.dumps(params)[:400]}\n")
-            self.send({"id": rid, "result": {"decision": decision}})
+            # The wire verb for yes is "accept", not "approve". codex 0.146
+            # stderr, measured 1 Aug 2026: 'unknown variant `approved`,
+            # expected one of `accept`, `acceptForSession`,
+            # `acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`,
+            # `decline`, `cancel`'. A malformed decision does not fall back to
+            # asking again - the router logs "approval request failed" and the
+            # tool call dies, so the log shows an approval that never took
+            # effect (the first smoke turn logged 3 approves and wrote
+            # nothing). "decline" needs no mapping - it was always valid,
+            # which is why declining ever worked.
+            wire = "accept" if decision == "approve" else "decline"
+            self.send({"id": rid, "result": {"decision": wire}})
         elif method == "item/tool/requestUserInput":
             # 0.145 expects an answer map keyed by question id:
             #   {"answers": {"<question-id>": {"answers": ["<text>"]}}}
