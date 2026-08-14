@@ -6,7 +6,11 @@ the labour, Claude keeps the judgement.**
 - **`codex-delegate`** hands implementation work to **parallel Codex worker
   lanes**, each in its own git worktree, while Claude stays the architect.
 - **`codex-audit`** turns that machinery around: a Codex **red team** attacks
-  the code Claude wrote, and Claude verifies every finding before acting on it.
+  the code Claude wrote, Claude verifies every finding before acting on it, and
+  the fix itself goes back through the red team before the work is called done.
+
+Every rule in these skills came from something breaking in real use. The log,
+with the measurement behind each rule, is in [FIELD-LOG.md](FIELD-LOG.md).
 
 ## codex-delegate - parallel worker lanes
 
@@ -21,21 +25,24 @@ scarce resource, and delegation spends someone else's.
 
 ## What makes this different from just asking another model
 
-- **Lanes, not a lock.** v1 serialized everything behind a global lock so two
-  writers could not collide in one tree. v2 gives every worker its own
-  worktree - nothing to collide with, so independent slices run in parallel
-  and the architect keeps working in the main tree meanwhile.
+- **Lanes, not a lock.** Every worker gets its own worktree - nothing to
+  collide with, so independent slices run in parallel and the architect keeps
+  working in the main tree meanwhile.
 - **The footprint is exact.** A lane starts clean at a pinned SHA, so `git
   status` inside it IS the worker's footprint - every path is attributed, new
   files included, no baseline diffing. Anything outside the spec's whitelist
   stops the lane.
-- **Nothing is trusted.** The worker's report is a claim. Claude re-runs the
-  acceptance command itself, inside the lane, and reads the diff before one
-  line of it reaches the main tree. A read-only Codex reviewer passes over the
-  lane first, and its own footprint must be empty.
+- **Nothing is trusted, including the wrapper.** The worker's report is a
+  claim. Claude re-runs the acceptance command itself, inside the lane, and
+  reads the diff before one line of it reaches the main tree. The dispatcher
+  distinguishes a completed turn from a provider refusal and from a turn whose
+  permissions were declined, because all three used to look like success.
+- **The mechanical parts are scripts, not instructions.** Opening a lane,
+  seeding a turn, closing it out, running the probes - each is one command,
+  because each is a list of steps with no judgment in it where every step can
+  fail quietly.
 - **The worker can use MCP.** Grants are per task, registered up front, and
-  outward-facing servers require your explicit approval each time - that part
-  did not loosen.
+  outward-facing servers require your explicit approval each time.
 
 ## Install
 
@@ -48,9 +55,9 @@ Then, once - resolve the script path first (`$CLAUDE_PLUGIN_ROOT` exists for
 the plugin loader, not in your shell):
 
 ```bash
-SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 7 -type f \
-  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
-  | sed 's|/scripts/doctor.py||')
+SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 10 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' 2>/dev/null \
+  | sort -V | tail -1 | sed 's|/scripts/doctor.py||')
 echo "${SKILL_DIR:?not found - is the plugin installed?}"
 
 python3 "$SKILL_DIR/scripts/doctor.py" --init
@@ -72,11 +79,20 @@ echo '.delegate-runs/' >> .gitignore
 - `codex` on PATH, **0.145 or newer** (`npm i -g @openai/codex`), and a login:
   `codex login`. The approval reply schemas changed in 0.145; both `--check`
   and `dispatch.py` enforce the floor rather than guessing.
-- **Python 3.11+.** Both scripts need `tomllib`; stock macOS `/usr/bin/python3`
-  is 3.9 and both scripts say so plainly instead of tracebacking.
-- macOS or Linux. Windows is untested.
+- **Python 3.11+** (the scripts need `tomllib`). Two traps worth knowing before
+  they cost you an hour: stock macOS `/usr/bin/python3` is 3.9, and on Windows
+  `python3` is usually the Microsoft Store stub that prints "Python was not
+  found" and exits 9009 with empty output. Use `python` or a versioned
+  `python3.12` there - the skills resolve the interpreter by handshake rather
+  than trusting the name, and so should you.
 
-Verified on macOS with codex-cli 0.145.0.
+**Platforms.** macOS, Linux and Windows. One difference is worth stating
+plainly rather than burying: on macOS the OS sandbox (seatbelt) enforces the
+lane boundary before Codex ever asks for permission, while on Windows no OS
+sandbox runs and containment falls to a path-scoping check inside the
+dispatcher. That is a weaker guarantee. It is documented as such in the skill,
+which also tells you how to measure it on your own machine instead of taking
+either claim on faith.
 
 ## Use
 
@@ -91,14 +107,16 @@ server, and enabling network access for a lane.
 
 To audit: say so when a piece of work is done - "audit today's work" - or
 `/codex-audit`. There is no automatic trigger, deliberately: an audit spends
-real time and tokens. A comprehensive refactor has to be asked for by name.
+real time and tokens. Asking to "harden" or "make this production-ready" runs
+the same hunt with the whole project in scope and the fragility lenses on. A
+comprehensive refactor has to be asked for by name.
 
 To let the worker use one of your MCP servers:
 
 ```bash
 python3 "$SKILL_DIR/scripts/doctor.py" --list-mcp
-python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp unityMCP
-python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp unityMCP   # undo
+python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp <server-name>
+python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp <server-name>   # undo
 ```
 
 `--list-mcp` blocks servers that carry credentials, point somewhere remote,
@@ -111,24 +129,38 @@ per dispatch.
 Claude wrote the codebase, so Claude is the wrong auditor for it. Ask it to
 audit the day's work and it briefs a Codex red team from `git diff` (not from
 its memory of the session - a narrative brief audits your intentions, the diff
-audits your code), classifies the threat surface, and fans lenses out to Codex
-subagents inside a disposable worktree where the sandbox holds but nothing is
-off-limits.
+audits your code), classifies the threat surface, and sends one lens per lane
+into disposable worktrees where the sandbox holds but nothing is off-limits.
 
 Then the part that makes it usable: **a finding without a runnable proof is a
-hypothesis, not a vulnerability.** Every finding ships a `probes/*.sh` that is
-red now and green once fixed. Claude runs each proof first - findings that do
-not reproduce die for free, before any agent looks at them. Survivors get
-re-anchored in the live tree, judged for reachability, and high-severity ones
-get an agent whose job is to *refute* them. Claude fixes what is left, and the
-proof flipping green is what says it is fixed.
+hypothesis, not a vulnerability.** Every finding ships a probe that is red now
+and green once fixed - and the probe has to exercise behaviour rather than grep
+the source, because a fix that changes the wording of the code would flip a
+grep without changing anything real. Claude runs every proof first: findings
+that do not reproduce die for free, before any agent looks at them. Survivors
+get re-anchored in the live tree, judged for reachability, and high-severity
+ones get an agent whose job is to *refute* them.
+
+**Then the fix goes through the same gate.** A fix is fresh, unaudited code,
+and the loop does not end when the probe turns green: a verification round
+takes the fix diff back to the red team, and every finding it returns gets a
+written verdict - *blocker* (real, reachable, fix it and go round again),
+*guard* (unlikely only because a human habit prevents it, so the habit becomes
+a check), or *demoted* (with the assumption it rests on named out loud). The
+work is done at zero blockers, capped at three rounds, because a third round
+still finding blockers is evidence about the approach rather than a request
+for a fourth.
+
+Probes that survive are promoted into the project's own test suite. That is
+the part that compounds: "bulletproof" here is not an adjective, it is a
+codebase that has accumulated its proofs as regression tests.
 
 It also carries a **hygiene lens** for the residue machine-written code leaves:
 escape-hatch types, dead code, pass-through wrappers, error handlers that
 swallow the error, tests that assert nothing. Counters run before opinions,
-because `any` count can be wrong and "this feels cleaner" cannot. Comments are
-audited by **necessity, in both directions** - there is no target density, so
-noise is a finding and so is a non-obvious decision left unexplained.
+because an `any` count can be wrong and "this feels cleaner" cannot. Comments
+are audited by **necessity, in both directions** - there is no target density,
+so noise is a finding and so is a non-obvious decision left unexplained.
 
 A second mode does a comprehensive refactor, and only on an explicit request:
 deterministic inventory, Claude edits in batches, the full gate green after
@@ -149,10 +181,11 @@ raises on an MCP tool call, so every one dies as `user cancelled MCP tool
 call`, and the only workaround disables the sandbox entirely.
 
 Everything else is files on disk, inside the lane: the spec, the prompt, the
-full transcript, the worker's final report, and a round ledger. Disk is the
-durable state - a lane survives context compaction and session death, and a
-fresh worker pointed at the same spec resumes the work by reading the real
-tree, not a memory of it.
+full transcript, the worker's final report, a round ledger, and a completion
+marker that a detached lane writes however it ends. Disk is the durable state -
+a lane survives context compaction and session death, and a fresh worker
+pointed at the same spec resumes the work by reading the real tree, not a
+memory of it.
 
 ## What it will not do
 
@@ -180,8 +213,11 @@ skills/codex-delegate/
   references/review-protocol.md  the reviewer's contract
   references/research-task.md    variant for tasks whose output is a report
   references/setup.md            setup and troubleshooting
-  scripts/dispatch.py            app-server client; one worker turn
   scripts/doctor.py              setup, trust, MCP handover, preflight checks
+  scripts/new-lane.py            open / turn / close a lane - the scaffold and its cleanup
+  scripts/dispatch.py            app-server client; one worker turn
+  scripts/run-probes.py          run audit probes, verify runner and root, one verdict table
+FIELD-LOG.md                     what broke in real use, and the rule each failure bought
 ```
 
 ## License

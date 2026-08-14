@@ -25,9 +25,10 @@ delegated.
 
 ## 0. Routing - when to delegate
 
-Delegation is YOUR routing call, made per task on merit. There is no per-session
-approval gate: the user granted a standing authorization (2026-07-26). If the
-user says "don't delegate", that sticks until they say otherwise.
+Delegation is YOUR routing call, made per task on merit. Installing this skill
+is the standing authorization, so there is no per-session approval gate - ask
+once and you will be asked to stop asking. If the user says "don't delegate",
+that sticks until they say otherwise.
 
 **The test is spec-completeness: can you write a complete SPEC.md right now -
 goal, file whitelist, acceptance command - without guessing?**
@@ -79,7 +80,7 @@ Two measured corrections live in that command, both silent when wrong:
   decoration.
 - **`sort -V | tail -1` instead of `-print -quit`.** The cache keeps one
   directory per installed version, and `-quit` takes whichever the filesystem
-  hands over first - reproduced here: with 2.4.0 and 2.5.0 both present it
+  hands over first - reproduced: with 2.4.0 and 2.5.0 both present it
   picked **2.4.0**. Running the previous version's scripts against this
   version's protocol is the kind of failure that shows up as an unrelated bug
   three steps later. Sorting by version and taking the last one is the fix; an
@@ -108,7 +109,7 @@ a glob matches nothing. `find` has no such behaviour.
   The lesson generalises past zsh: a verification that measures the wrong thing
   is worse than none.
 
-**Python 3.11+ is required**: both scripts import `tomllib`. Stock macOS
+**Python 3.11+ is required**: the scripts import `tomllib`. Stock macOS
 `/usr/bin/python3` is 3.9 and dies at the import line. Which command provides
 that interpreter is never assumable either - §3 resolves `PY_BIN` by handshake
 once per session, and every script call in this protocol goes through it.
@@ -160,7 +161,8 @@ this protocol is repo-root relative.
 PY_BIN=""                                   # resolve the interpreter, do not assume it
 for c in python3 python py; do              # being on PATH is not being able to run
   command -v "$c" >/dev/null 2>&1 || continue
-  [ "$("$c" -c 'print("PY_OK")' 2>/dev/null)" = "PY_OK" ] && { PY_BIN="$c"; break; }
+  [ "$("$c" -c 'import tomllib; print("PY_OK")' 2>/dev/null)" = "PY_OK" ] \
+    && { PY_BIN="$c"; break; }
 done
 [ -n "$PY_BIN" ] || echo "BLOCK: no runnable Python - setup, dispatch and doctor all need one"
 
@@ -173,7 +175,7 @@ git worktree list                               # stale lanes from dead sessions
 **Resolve `PY_BIN` once, here, and use it at every script call site below**
 (§4's `--trust`, §5's dispatch). Like `SKILL_DIR` it is session state, not a
 per-command lookup. **Resolution is by OUTPUT, never by `command -v`** -
-measured (Windows 11, 30 Jul 2026): `python3` is the Microsoft Store stub,
+measured (Windows): `python3` is the Microsoft Store stub,
 which sits *on* `PATH`, prints nothing to stdout and exits `9009`; there is no
 Python behind it. The working interpreter on that machine was `python` (3.13).
 `command -v python3` succeeds there and proves nothing, so the loop demands the
@@ -183,7 +185,7 @@ stayed bare: **the scope query survived the field run, setup and dispatch did
 not.**
 
 **The `.gitignore` line reports; it does not fix.** An earlier version appended
-`.delegate-runs/` to `.gitignore` itself. Measured 30 Jul 2026: the operator's
+`.delegate-runs/` to `.gitignore` itself. Measured: the operator's
 tree was deliberately clean and awaiting push, and that append would have
 slipped a fourth unreviewed change into the pending commit set. A tool must not
 edit the repository it is about to open lanes in - the user's diff is theirs,
@@ -209,6 +211,27 @@ a task does not need.
 
 ```bash
 TASK_ID=$(date +%F)-<shortname>                    # e.g. 2026-07-26-inventory-ui
+LANE="$(dirname "$PWD")/$(basename "$PWD")-lanes/$TASK_ID"   # the path open uses
+"$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" --base "$BASE_SHA"
+# --mode audit|research for the sibling flows · --lane <path> for a short root
+# (see the MAX_PATH note below) · run it from the MAIN tree, never from a lane
+```
+
+Set `LANE` yourself as above and check it against the `lane:` line the command
+prints - everything downstream (`dispatch`, the DONE poll, `close`) is
+`"$LANE"`, and an unset one silently becomes the current directory.
+
+That is the whole scaffold: worktree at the verified base, trust entry, run
+dir, changelog skeleton, PROMPT.txt. It exists because the list is six steps
+with no judgment in it and each one fails quietly - measured at six
+lanes in one session and six passes through it by hand. It stops at SPEC.md,
+which is yours, and it will not print a dispatch line until that file exists
+and is not a skeleton: a lane dispatched against an empty spec costs a whole
+turn and returns a worker asking what to do.
+
+By hand, when you need to see or vary the steps:
+
+```bash
 LANE="$(dirname "$PWD")/$(basename "$PWD")-lanes/$TASK_ID"
 git worktree add --detach "$LANE" "$BASE_SHA"
 test "$(git -C "$LANE" rev-parse HEAD)" = "$BASE_SHA" || echo "BLOCK: lane not at BASE_SHA"
@@ -221,7 +244,7 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
 - **Windows: budget the path length BEFORE `worktree add`.** The sibling-dir
   convention above adds ~34 characters over the repo root (`-lanes/` plus the
   dated task id), and Windows still enforces MAX_PATH = 260 on most tooling.
-  Measured 30 Jul 2026: deepest tracked path 193 chars, +34 → 276, and
+  Measured: deepest tracked path 193 chars, +34 → 276, and
   `worktree add` itself failed. Check the budget, and when it does not close,
   put the lane under a short root instead - the convention is a default, not
   a contract:
@@ -292,7 +315,13 @@ the architect's independent verdict.
 **You own the turn counter.** Every dispatch is a cold start - the worker has
 no memory of earlier turns and cannot know N. Before each retry, rewrite the
 instruction line with the new N, seed the new turn's skeleton, and confirm
-`turn-<N-1>.md` is still on disk.
+`turn-<N-1>.md` is still on disk. All three at once:
+
+```bash
+"$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" turn --lane "$LANE" --task-id "$TASK_ID" --turn <N>
+# --recovery swaps in the recovery instruction line (§10)
+# refuses when turn-<N-1>.md is absent, or when turn-<N>.md is already filled in
+```
 
 ## 5. Dispatch
 
@@ -301,6 +330,7 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
   --task-dir "$LANE/.delegate-runs/$TASK_ID" \
   --repo "$LANE" \
   --prompt-file "$LANE/.delegate-runs/$TASK_ID/PROMPT.txt" \
+  --done-file "$LANE/.delegate-runs/$TASK_ID/DONE" \
   --timeout 3600
   # --mcp <name>          per granted server, registered in §3
   # --sandbox read-only   for review lanes
@@ -309,6 +339,37 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
 it blocks idle sleep, not a closed lid, so it never replaces the liveness check.
+
+**When the harness does not wake you** - a detached `nohup`, a background
+`Start-Process`, a lane launched from another session - `--done-file` is the
+completion signal. Poll the file, not the process table:
+
+```bash
+D="$LANE/.delegate-runs/$TASK_ID/DONE"
+rm -f "$D"                                    # BEFORE launching: see below
+while [ ! -f "$D" ]; do sleep 20; done
+cat "$D"                                      # rc=<n> verdict=<...> final=<path>
+```
+
+```powershell
+# same rule, PowerShell: the marker is the signal, not the process table
+$D = "$LANE\.delegate-runs\$TASK_ID\DONE"
+Remove-Item $D -ErrorAction SilentlyContinue   # BEFORE launching
+while (-not (Test-Path $D)) { Start-Sleep 20 }
+Get-Content $D
+```
+
+**Clear it before you launch, not after.** dispatch.py deletes a stale marker
+too, but it does so ~100 ms into its own startup, and a `[ -f ]` test takes
+about a millisecond: measured, a poll started right after `nohup ... &`
+returned on its first iteration holding the PREVIOUS turn's rc and verdict.
+`new-lane.py turn` clears it when it seeds the turn, which is the same fix one
+step earlier.
+
+It is written however the turn ends - success, failure, timeout, a rejected
+argument, or an unhandled crash - so the poll cannot outlive the run. Without
+it every lane grows its own watcher loop: measured at six lanes and
+six loops in one session, none of them agreeing on what to look for.
 
 **Round bookkeeping lives on disk, not in your context.** Before every dispatch
 (worker, review, or retry) append one line to the lane's `ROUNDS.txt`:
@@ -328,10 +389,24 @@ runs is wedged regardless of what `ps` says. dispatch.py kills the worker at
 `--timeout` and exits non-zero, so the ceiling is enforced - but check log
 growth when a lane feels slow instead of waiting the timeout out.
 
-**Check dispatch.py's exit code BEFORE reading FINAL.txt.** Non-zero means the
-turn never completed; FINAL.txt then contains `DISPATCH FAILED: <reason>`. Read
-the last ~40 lines of RAW_OUTPUT.log for the cause and go to §10 - never treat
-a stale report as this round's result.
+**Check dispatch.py's exit code BEFORE reading FINAL.txt** - and read `5` as
+its own case, not as one more failure:
+
+| exit | what happened | FINAL.txt holds |
+|---|---|---|
+| `0` | turn completed, nothing declined | the worker's report |
+| `5` | turn completed, but approvals were **declined** - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
+| `1` | the turn failed, timed out, or the provider refused it | `DISPATCH FAILED: <reason>` - unless it died before the turn began (unreadable prompt file, no codex CLI), where there is no FINAL.txt and the reason is on stderr |
+| `2` `3` `4` | preflight: bad argument, toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
+
+`1` is the case that sends you to §10: read the last ~40 lines of
+RAW_OUTPUT.log for the cause, and never treat a stale report as this round's
+result. `5` is the opposite - the report is real and must be read, because the
+turn ran to completion with permissions it needed denied, and what it produced
+is whatever survived that. The blanket rule that used to sit here ("non-zero
+means the turn never completed") predates exit 5 and would have you discard a
+finished turn; the grep for `^\[decline\]` in RAW_OUTPUT.log tells you what it
+was denied.
 
 **A provider can refuse a turn, and the refusal arrives as a completion.**
 `turn/completed` carries a `status` and, when it failed, `error.codexErrorInfo`.
@@ -445,6 +520,15 @@ git apply         "$LANE/.delegate-runs/$TASK_ID/lane.patch"
 
 ## 9. Closeout - per lane, never skipped
 
+Steps 1 and 2 are one command - the same script that opened the lane closes it:
+
+```bash
+"$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" close --lane "$LANE" --task-id "$TASK_ID"
+# archives, removes the worktree, prunes, drops the trust entry.
+# It refuses while the lane holds changes outside .delegate-runs/ - integrate
+# them first, or pass --force if they are genuinely disposable.
+```
+
 1. **Archive the contract:** copy `SPEC.md`, `turn-*.md`, `FINAL.txt`,
    `ROUNDS.txt` to `<main-repo>/.delegate-runs/ARCHIVE/<task-id>/`. Until the
    user reviews the uncommitted diff, the spec is the only record of what was
@@ -493,3 +577,13 @@ states exactly what changes; anything not listed there is unchanged.
 - `references/review-protocol.md` - reviewer contract
 - `references/research-task.md` - variant for report-producing tasks
 - `references/setup.md` - environment setup and troubleshooting
+
+## Scripts
+
+All four live in `$SKILL_DIR/scripts/` and run under `"$PY_BIN"` on both
+platforms. None of them makes a decision that belongs to the architect.
+
+- `doctor.py` - preflight, worker home, trust entries, MCP handover
+- `new-lane.py` - `open` / `turn` / `close`: the lane scaffold and its cleanup
+- `dispatch.py` - one worker turn, with `--done-file` as the completion signal
+- `run-probes.py` - run audit probes, verify the runner and the root, one verdict table

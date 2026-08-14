@@ -69,8 +69,8 @@ SKILL.md §4 includes this step; `--smoke` trusts its own temp dir the same way.
 
 ```bash
 python3 "$SKILL_DIR/scripts/doctor.py" --list-mcp     # what Claude has, incl. plugin servers
-python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp unityMCP
-python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp unityMCP   # undo
+python3 "$SKILL_DIR/scripts/doctor.py" --add-mcp <server-name>
+python3 "$SKILL_DIR/scripts/doctor.py" --remove-mcp <server-name>   # undo
 ```
 
 `--list-mcp` marks a server `blocked` when it carries credentials, points at a

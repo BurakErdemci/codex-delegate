@@ -138,7 +138,7 @@ def trust_project(home: Path, path: Path) -> tuple[bool, str]:
     Codex asks for folder trust per exact project path; dispatch.py can only
     answer that request emptily, so an untrusted cwd looks like a hung turn.
     Trust entries are per path - a trusted parent does NOT cover children
-    (measured: a field config carried /private/tmp AND /private/tmp/cdtest).
+   (measured: a field config carried /private/tmp AND /private/tmp/cdtest).
     """
     resolved = str(path.resolve())
     config = home / "config.toml"
@@ -152,7 +152,7 @@ def trust_project(home: Path, path: Path) -> tuple[bool, str]:
         return True, f"already trusted: {resolved}"
     # json.dumps, not f'"{resolved}"': a raw Windows path in a TOML basic
     # string turns \U into a unicode escape and the WHOLE config stops
-    # parsing - measured 30 Jul 2026, while --trust still said [ ok ].
+    # parsing - measured, while --trust still said [ ok ].
     with open(config, "a", encoding="utf-8") as fh:
         fh.write(f'\n[projects.{json.dumps(resolved)}]\ntrust_level = "trusted"\n')
     return True, f"trusted: {resolved}"
@@ -301,8 +301,8 @@ def cmd_check(home: Path) -> int:
         # Spawn the resolved path, not the bare name: npm installs the CLI as
         # codex.CMD on Windows and CreateProcess resolves only .exe, so
         # subprocess.run(["codex", ...]) raises FileNotFoundError WinError 2 on
-        # a machine where the which() above just succeeded (measured: Windows 11,
-        # codex-cli 0.146.0). On POSIX which() returns an absolute path too, so
+        # a machine where the which() above just succeeded (measured on
+        # Windows 11). On POSIX which() returns an absolute path too, so
         # this is one code path, not a platform branch.
         proc = subprocess.run([codex, "--version"], capture_output=True, text=True, timeout=30)
     except Exception as exc:

@@ -33,8 +33,8 @@ BASE_SHA: <the SHA the lane worktree is pinned to - verify with `git -C <lane> r
  in chat before dispatch.>
 
 Example:
-- unityMCP - create and wire components in the prototype scene. Do NOT enter play
-  mode, take screenshots, or save over other scenes; the architect verifies
+- editorMCP - create and wire components in the prototype scene. Do NOT enter
+  play mode, take screenshots, or save over other scenes; the architect verifies
   behaviour separately.
 
 ## NETWORK
@@ -62,10 +62,18 @@ Example:
 - No new dependencies (unless listed here explicitly: <none | list>)
 - No refactoring outside the whitelist, no drive-by cleanups
 - No file deletion unless the whitelist marks it (delete)
+- No calls to <metered executor, paid API, licensed binary> - stub it or use a
+  recorded response. <none, if the task has no metered surface>
 ```
 
 ## Rationale (for the architect - not copied into SPEC.md)
 
+- **The metered-call line in FORBIDDEN**: a worker that calls a paid API or a
+  quota-bearing binary spends real budget, and an audit probe spends it again
+  on every re-run. Three briefs in one field session carried this as a
+  hand-typed sentence, which is the shape a rule takes right before the run
+  where someone forgets it. `none` is a valid answer and is faster to write
+  than remembering whether it applies.
 - **Changelog path inside the whitelist**: the worker is told never to write
   outside the whitelist, so the changelog must be listed or the two rules
   contradict each other. A worker was observed skipping the changelog while still
@@ -124,10 +132,10 @@ checker that read correctly on the page and still could never pass:
   `re.MULTILINE` the `^` anchors to the start of the whole string, so it matched
   nothing at all and every run failed identically.
 - The same pattern with `\S+` truncated each path at its first space. The
-  repository lived in `~/Documents/The Coding`, so every extracted path became
-  `/Users/me/Documents/The`. **Build the fixture with your real paths**, not with
-  `/tmp/foo.txt`; spaces, non-ASCII characters and symlinks all occur in real
-  project paths and none of them appear in a toy fixture.
+  repository lived under a directory whose name contained a space, so every
+  extracted path was cut short there. **Build the fixture with your real
+  paths**, not with `/tmp/foo.txt`; spaces, non-ASCII characters and symlinks
+  all occur in real project paths and none of them appear in a toy fixture.
 
 Say in the spec what the command does NOT prove. A compile check does not prove
 behaviour, and the worker must not treat green as done.

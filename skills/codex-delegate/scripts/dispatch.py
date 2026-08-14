@@ -13,24 +13,64 @@ and tool output) goes to RAW_OUTPUT.log and is never printed to stdout. Only the
 worker's final message is written to FINAL.txt. The architect reads FINAL.txt.
 
 Exit codes: 0 turn completed, no approvals declined · 1 dispatch/turn failed ·
-2 bad arguments · 3 codex-cli too old · 4 unregistered MCP server · 5 turn
-completed but one or more approvals were declined. 5 exists because a blocked
-worker used to count as a successful turn: measured 30 Jul 2026, two lanes
-exited 0 with a contract-perfect FINAL.txt whose body said "status: blocked ...
+2 bad arguments · 3 toolchain too old (codex-cli or Python) · 4 unregistered
+MCP server · 5 turn completed but one or more approvals were declined. 5 exists because a blocked
+worker used to count as a successful turn: two lanes exited 0 with a
+contract-perfect FINAL.txt whose body said "status: blocked ...
 permissions were declined", and the only thing that caught it was a human
 reading `status:` - the return code must carry it.
+
+--done-file writes that same verdict plus the exit code to a marker file when
+the turn ends, whatever way it ends. Detached lanes have no other completion
+signal, and the poll is one file test instead of a per-lane watcher loop.
 
 Requires Python 3.11+ (tomllib) and codex-cli 0.145+ (see PERMISSION_SCHEMA_MIN).
 """
 
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 11):
+    # This gate runs BEFORE `import tomllib`, and writes the completion marker
+    # itself, because both facts are load-bearing. Measured: an interpreter can
+    # answer the `PY_OK` handshake the skills use and still lack tomllib (stock
+    # macOS /usr/bin/python3 is 3.9.6), so a lane can be dispatched with it.
+    # The import then fails at module level - before argparse, before main() -
+    # and a detached lane leaves no marker at all, so the documented poll waits
+    # forever on a process that died in the first millisecond.
+    import os
+
+    _argv = sys.argv[1:]
+    _done = None
+    for _i, _item in enumerate(_argv):
+        _name, _, _inline = _item.partition("=")
+        if _name.startswith("--") and len(_name) > 2 and "--done-file".startswith(_name):
+            _done = _inline or (_argv[_i + 1] if _i + 1 < len(_argv)
+                                and not _argv[_i + 1].startswith("-") else None)
+            break
+    print(
+        f"ERROR: dispatch.py needs Python 3.11+ for tomllib; this is "
+        f"{sys.version.split()[0]} at {sys.executable}. Being on PATH and "
+        f"answering a handshake is not the same as being able to run this - "
+        f"try python3.13/3.12/3.11, or `brew install python`.",
+        file=sys.stderr,
+    )
+    if _done:
+        try:
+            os.makedirs(os.path.dirname(_done) or ".", exist_ok=True)
+            with open(_done, "w", encoding="utf-8") as _fh:
+                _fh.write("rc=3\nverdict=NO-TURN (interpreter too old)\nfinal=-\n")
+        except OSError:
+            pass
+    raise SystemExit(3)
+
 import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
-import sys
 import threading
 import time
 import tomllib
@@ -70,8 +110,7 @@ PERMISSION_APPROVAL = "item/permissions/requestApproval"
 # this client really is an attempt to act outside the sandbox and blanket
 # decline is correct there. On Windows no OS sandbox runs (the vendor sandbox
 # setup exe is not installed) and Codex escalates anything it cannot prove
-# safe: measured 30 Jul 2026 on Turkish Windows 11, 12 declines across 2
-# running lanes, the first two declined commands being plain in-lane file reads
+# safe: measured on Windows 11 - 12 declines across two running lanes, the first two declined commands being plain in-lane file reads
 # (a `powershell -Command '$files = @(...)'` pipeline and a
 # `Get-Content -LiteralPath ... | ForEach-Object`). Both lanes finished all
 # their reading yet shipped ZERO artifacts and reported "required write and
@@ -123,7 +162,7 @@ def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     # PowerShell -Command strings arrive with their inner quotes escaped, so a
     # quoted word shows up as '\"import' - the leading backslash then reads as
     # a rooted path below. Unescape first so the wrap-strip can do its job.
-    # Measured 1 Aug 2026 (k3-acl): \"import, \"from and a \"-prefixed regex
+    # Measured: \"import, \"from and a \"-prefixed regex
     # alternation were all declined "absolute path outside lane", which blocked
     # every Python probe of the run.
     token = token.replace('\\"', '"').replace("\\'", "'")
@@ -162,7 +201,7 @@ def enrich_file_change(params: dict, items_by_id: dict) -> dict:
     """Graft the cached fileChange item onto a path-less approval payload.
 
     0.145's fileChange approval names only the itemId - the changed paths
-    travelled EARLIER, in the item/started notification. Measured 31 Jul 2026
+    travelled EARLIER, in the item/started notification. measured
     (audit-k1c line 1509 vs 1511): an in-lane findings write arrived as
     {"itemId": ..., "reason": null, "grantRoot": null} and was declined
     "unrecognized approval payload" while its full path list sat one
@@ -224,7 +263,7 @@ def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, 
         # argv[0] is the PROGRAM, not an operand - every interpreter lives
         # outside the lane by definition. Judging it under the containment
         # rule declined every shell-wrapped command Codex issued (measured
-        # 31 Jul 2026: 8/8 rounds BLOCKED-BY-APPROVALS, 74 declines, 0
+        # measured: 8/8 rounds BLOCKED-BY-APPROVALS, 74 declines, 0
         # approvals) and shadowed the real rule: a genuine escaping write was
         # declined for the WRONG reason. Exempting it loses no containment -
         # the same worker reaches any executable through an approved shell
@@ -249,7 +288,7 @@ def codex_path() -> str:
 
     npm installs the CLI as codex.CMD on Windows, and CreateProcess resolves
     only .exe, so the bare name fails on a machine where codex is perfectly well
-    installed. Measured (Windows 11, Python 3.13.13, codex-cli 0.146.0):
+    installed. Measured on Windows 11:
     subprocess.run(["codex", "--version"]) raises FileNotFoundError WinError 2,
     while the same call through shutil.which("codex") ->
     ...\\AppData\\Roaming\\npm\\codex.CMD returns rc=0. which() returns an
@@ -265,7 +304,7 @@ def kill_tree(proc: subprocess.Popen) -> None:
     """Kill the app-server and everything it spawned.
 
     On Windows the npm shim builds a cmd.exe -> node.exe -> codex.exe chain and
-    Popen.kill() only reaches the cmd.exe root. Measured twice on this machine:
+    Popen.kill() only reaches the cmd.exe root. Measured twice:
     after proc.kill() the node and codex.exe processes were still alive, holding
     the model session open with nobody left to read them. taskkill /T walks the
     tree. POSIX keeps kill(), where there is no shim to hide behind.
@@ -337,9 +376,9 @@ class AppServer:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log,
                 # The app-server speaks UTF-8 JSON regardless of console
                 # codepage. text=True alone decodes with the locale default -
-                # cp125x on Turkish Windows - and the first non-ASCII byte in
+                # cp125x on a non-UTF-8 console - and the first non-ASCII byte in
                 # a worker message killed the parent with UnicodeDecodeError
-                # while the worker ran on (measured 30 Jul 2026, 3 lanes lost).
+                # while the worker ran on (measured: 3 lanes lost).
                 text=True, encoding="utf-8", errors="replace", bufsize=1,
             )
         except FileNotFoundError as exc:
@@ -463,7 +502,7 @@ class AppServer:
                 # re-run by hand against captured payloads.
                 self.log.write(f"[decline] {method}: {reason}: {json.dumps(params)[:400]}\n")
             # The wire verb for yes is "accept", not "approve". codex 0.146
-            # stderr, measured 1 Aug 2026: 'unknown variant `approved`,
+            # stderr: 'unknown variant `approved`,
             # expected one of `accept`, `acceptForSession`,
             # `acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`,
             # `decline`, `cancel`'. A malformed decision does not fall back to
@@ -538,7 +577,54 @@ class AppServer:
                 pass
 
 
-def main() -> int:
+def write_done(path: Path, rc: int, final_path: Path, verdict: str | None = None) -> None:
+    """Drop the completion marker a waiting architect polls for.
+
+    Written on EVERY exit path, crashes included. The failure this closes:
+    lanes are launched detached (`nohup ... &`, `Start-Process`) and nothing
+    told the architect when one landed, so every run grew a hand-built watcher
+    loop per lane - measured at six lanes, six loops, all of them
+    grepping for different strings. A marker that appeared only on success
+    would be worse than none: the runs that hang are exactly the ones that
+    need attention, and a poll that never returns hides them.
+    """
+    if verdict is not None:
+        # An explicit verdict means the caller KNOWS no turn ran, so FINAL.txt
+        # must not be consulted: on a rejected argument the file still holds
+        # the previous round's report, and reading it announced `rc=2
+        # verdict=OK` - a failed launch wearing the last success's clothes.
+        lines: list[str] = []
+    else:
+        verdict = "UNKNOWN"
+        try:
+            lines = final_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            # No FINAL.txt at all means we died before the turn - an old CLI,
+            # an unregistered MCP server, an unreadable prompt. rc says which.
+            lines = []
+            verdict = "NO-TURN"
+    for line in reversed(lines):
+        if line.startswith("--- dispatch:"):
+            verdict = line.strip("- ").split("dispatch:", 1)[1].strip()
+            break
+    body = f"rc={rc}\nverdict={verdict}\nfinal={final_path}\n"
+    if not path.name:
+        # `--done-file ""` reaches here as Path('.'), and `.with_name()` then
+        # raises ValueError rather than OSError - straight past the caller's
+        # guard, which turned a completed turn into a traceback with no marker.
+        # An unset "$D" in a hand-shortened dispatch line is all it takes.
+        raise OSError(f"{str(path)!r} is not a file path for a completion marker")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(body, encoding="utf-8")
+    # os.replace is atomic on POSIX and on NTFS alike. A poller that catches a
+    # half-written marker reads rc= as empty and calls a running lane finished,
+    # which is the same class of silent-wrong-answer as every other bug in
+    # this file's history.
+    os.replace(tmp, path)
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="Dispatch one Codex worker turn.")
     ap.add_argument("--task-dir", required=True, type=Path, help="run directory that holds SPEC.md")
     ap.add_argument("--repo", required=True, type=Path, help="repository root the worker runs in")
@@ -556,7 +642,23 @@ def main() -> int:
                          "probably looking for is sandbox_workspace_write.network_access=true, "
                          "which lets the worker's shell reach the network while keeping the "
                          "filesystem sandbox. Keys that would disable the sandbox are refused.")
-    args = ap.parse_args()
+    ap.add_argument("--done-file", type=Path, default=None, metavar="PATH",
+                    help="write a completion marker here when the turn ends, however it ends "
+                         "(rc=, verdict=, final=). Poll for this one file instead of building "
+                         "a watcher per detached lane.")
+    return ap
+
+
+def run(args: argparse.Namespace) -> int:
+    # First thing, before any preflight can return: last round's report must
+    # not survive into this one. Measured in review - a rejected argument
+    # returned 2 while the previous turn's FINAL.txt still sat on disk, so the
+    # DONE marker read it back and announced `rc=2 verdict=OK`.
+    # Renamed rather than deleted: a turn that never starts should not destroy
+    # the evidence of the turn that did, and `close` archives both.
+    stale = args.task_dir / "FINAL.txt"
+    if stale.is_file():
+        os.replace(stale, args.task_dir / "FINAL.prev.txt")
 
     for kv in args.config:
         if "=" not in kv:
@@ -577,7 +679,13 @@ def main() -> int:
             print(f"WARNING: --config {key} contains '-'; Codex keys use '_' and a wrong key "
                   "is ignored without error.", file=sys.stderr)
 
-    version = codex_version()
+    try:
+        version = codex_version()
+    except (DispatchError, OSError, subprocess.SubprocessError) as exc:
+        # A traceback here exits 1 with no FINAL.txt, which the exit-code table
+        # promises carries `DISPATCH FAILED`. One classified line instead.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
     if version < PERMISSION_SCHEMA_MIN:
         print(
             f"ERROR: codex-cli {'.'.join(map(str, version))} is older than "
@@ -591,7 +699,11 @@ def main() -> int:
 
     task_dir: Path = args.task_dir
     task_dir.mkdir(parents=True, exist_ok=True)
-    prompt = args.prompt_file.read_text(encoding="utf-8")
+    try:
+        prompt = args.prompt_file.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: cannot read --prompt-file {args.prompt_file}: {exc}", file=sys.stderr)
+        return 1
 
     granted: list[str] = []
     if args.mcp:
@@ -717,12 +829,101 @@ def main() -> int:
     verdict_line = f"--- dispatch: {verdict} ---"
     final_text = server.final_text or "(worker produced no final message)"
     # The verdict rides in FINAL.txt as well as stdout and the exit code: two
-    # blocked lanes exited 0 with a contract-perfect FINAL.txt (30 Jul 2026)
+    # blocked lanes exited 0 with a contract-perfect FINAL.txt
     # and nothing but a human reading `status:` caught it.
     final_path.write_text(final_text.rstrip("\n") + "\n\n" + verdict_line + "\n", encoding="utf-8")
     print(verdict_line)
     print(f"final message -> {final_path}  transcript -> {log_path}")
     return 5 if declines else 0
+
+
+def peek_flag(argv: list[str], flag: str) -> str | None:
+    """Read one flag straight from argv, before argparse gets a say.
+
+    Needed because argparse exits the process itself on a bad flag, and the
+    marker has to be written for that too: measured in review, `--timeoutt 10`
+    exited 2 with no marker at all, and the documented `while [ ! -f DONE ]`
+    poll then waits forever on a lane that will never exist. A typo in a
+    hand-edited dispatch line is the likeliest way to reach it.
+
+    Two things it has to match argparse on, both measured: argparse accepts
+    unambiguous ABBREVIATIONS (`--done /path` works), and a missing value
+    leaves the next flag sitting where the value should be - taken literally,
+    `--done-file --task-dir /x` wrote a file named `--task-dir` into the cwd.
+    """
+    for i, item in enumerate(argv):
+        name, _, inline = item.partition("=")
+        if not (name.startswith("--") and len(name) > 2 and flag.startswith(name)):
+            continue
+        if inline:
+            return inline or None
+        value = argv[i + 1] if i + 1 < len(argv) else None
+        # A value that is itself a flag means the value was omitted.
+        return None if value is None or value.startswith("-") else value
+    return None
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    try:
+        args = build_parser().parse_args()
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 2
+        done = peek_flag(argv, "--done-file")
+        if done and code != 0:                      # --help exits 0 and is not a run
+            task = peek_flag(argv, "--task-dir") or "."
+            write_done(Path(done), code, Path(task) / "FINAL.txt", verdict="NO-TURN")
+        raise
+    if args.done_file:
+        # A marker left by an earlier round is a waiter's false green: the poll
+        # returns instantly and the architect reads last round's FINAL.txt as
+        # this round's result. Same trap FINAL.txt itself is renamed for.
+        # This unlink happens ~100ms into startup, which is not soon enough on
+        # its own - a poll launched right after `nohup ... &` can win that race
+        # - so `new-lane.py turn` clears it when it seeds the turn as well.
+        try:
+            args.done_file.unlink(missing_ok=True)
+        except OSError:
+            pass                                # write_done reports it properly
+        # A killed lane must release its waiter too. Measured: SIGTERM left no
+        # marker and the documented poll hung forever, with the app-server
+        # orphaned on top. SystemExit unwinds the stack, so the `finally` here
+        # and the one that closes the server both still run.
+        for name in ("SIGTERM", "SIGHUP", "SIGBREAK"):
+            sig = getattr(signal, name, None)      # SIGHUP is POSIX, SIGBREAK Windows
+            if sig is not None:
+                signal.signal(sig, lambda signum, _frame: sys.exit(128 + signum))
+    rc = 1
+    try:
+        rc = run(args)
+        return rc
+    except SystemExit as exc:
+        # A signal handler raises SystemExit(128+signum); without this the
+        # marker would say rc=1 and a poller could not tell "killed" from
+        # "failed".
+        rc = exc.code if isinstance(exc.code, int) else 1
+        raise
+    finally:
+        # finally, not a tail call: an unhandled exception must still release
+        # anyone polling the marker, carrying rc=1 rather than silence.
+        if args.done_file:
+            try:
+                write_done(args.done_file, rc, args.task_dir / "FINAL.txt")
+            except (OSError, ValueError) as exc:
+                # Losing the marker is bad; losing the marker AND the run's own
+                # verdict behind a traceback is worse, and that is what an
+                # unwritable or malformed done-file path used to do. stderr
+                # alone is not enough either - a detached run may discard it -
+                # so a fallback marker goes next to the report, where the task
+                # dir is known to be writable because FINAL.txt lives there.
+                print(f"WARNING: could not write the completion marker "
+                      f"({args.done_file}): {exc}. The turn's exit code is {rc}.",
+                      file=sys.stderr)
+                try:
+                    write_done(args.task_dir / "DONE", rc, args.task_dir / "FINAL.txt")
+                    print(f"wrote it to {args.task_dir / 'DONE'} instead", file=sys.stderr)
+                except (OSError, ValueError):
+                    pass
 
 
 if __name__ == "__main__":

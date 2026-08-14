@@ -26,9 +26,9 @@ a file either exists and is non-empty or it does not, and that is checkable.
 
 **Write each finding to its file the moment it exists - never batch them for
 the end of the turn.** The end of the turn is for the summary line, not for the
-first write. "Files survive an aggregation failure" understates the reason:
-measured 30 Jul 2026, a provider refusal killed a turn mid-run, *before* the
-worker's first write, and three finished findings died with it - they were
+first write. "Files survive an aggregation failure" understates the reason.
+Measured: a provider refusal killed a turn mid-run, before the worker's
+first write, and three finished findings died with it - they were
 recovered by hand from the raw transcript afterwards. A file that does not
 exist yet survives nothing. So the loop is: finding found -> finding appended
 to its lens file -> next surface. Only the `## Coverage` section and the
@@ -41,7 +41,7 @@ what it looked for. A missing file is an incomplete turn, not a clean lens.
 **One exception, and it is the disk itself: if your write commands are being
 declined by the harness, the no-findings-in-final rule inverts.** Put every
 finding - full format below, not a summary - into your final message, and say
-there that you did so because writes were blocked. Measured 31 Jul 2026: eight
+there that you did so because writes were blocked. Measured: eight
 consecutive turns had every command declined (74 declines, 0 approvals), zero
 findings files existed on disk, and 21 real findings - all 21 confirmed on
 re-measurement, two of them product-breaking - survived only because the brief
@@ -61,8 +61,8 @@ fixed. Red now, green after. That is the whole test.
 **That contract is binding; the language is not.** Write the probe in whatever
 this machine can actually run - `.sh` and `.py` are both first-class, and the
 extension only picks the runner (a verified bash, or the verified interpreter).
-Every rule in this file applies identically to both. Measured 30 Jul 2026: the
-first `bash` on the field machine was a WSL launcher stub with no distribution
+Every rule in this file applies identically to both. Measured: the
+first `bash` on one machine was a WSL launcher stub with no distribution
 installed while the code under audit was Python, so a `.sh`-only convention
 would have ended the run with zero evidence. If the brief names a language for
 this project, use that one.
@@ -167,7 +167,7 @@ it" is worth more than a guess dressed as a measurement.
 `verified-empirically` means the probe EXECUTED this run and printed its
 verdict. Source reading, call-path tracing, "inspection" - however careful -
 is `partially-verified` at most, and if nothing ran it is `unverified`.
-Measured 31 Jul 2026: a turn whose every command was declined still labelled a
+Measured: a turn whose every command was declined still labelled a
 finding verified with rationale "source and call-path inspection" - a label
 the verifier then has to distrust across the whole report. The three labels in
 the format block are the only valid values; anything else fails acceptance.
@@ -180,6 +180,7 @@ the format block are the only valid values; anything else fails acceptance.
 class:      <kebab-case type>            # e.g. missing-owner-check
 where:      <path>:<line>
 proof:      probes/<name>.<ext> | n/a (hygiene)
+green_when: <what must become true for that probe to exit 0>
 reachable:  <who can trigger this, through which entry point>
 severity:   high | med | low
 confidence: verified-empirically | partially-verified | unverified
@@ -199,6 +200,22 @@ Field notes:
   free-text title cannot be counted.
 - **`where`** must be a real line in the tree you are reading. Never invent a
   line number; if you are unsure, name the symbol instead.
+- **`green_when`** is the probe's own definition of fixed, in one sentence,
+  written while the probe is fresh in your mind. Not "the bug is gone" - the
+  observable the probe tests for: *"`load_config()` raises instead of
+  returning a partial dict"*, *"the request is rejected before the write"*.
+  It is required for every finding that carries a probe, and it is what makes
+  a probe reviewable before a fix is written rather than after it fails.
+
+  Measured: two probes went `rc=2` the moment the fix landed,
+  because each one's precondition contradicted the fix it was proving. One
+  asserted the tool exits `0` on the way in, while the requested fix was
+  "reject an invalid root and error out" - both cannot be true at once. The
+  other never gave its fake binary a working directory, so its `0` branch was
+  unreachable no matter what the fix did. Both cost a full round. A
+  `green_when` line makes that contradiction visible in the finding file,
+  where it costs one reading, instead of in the verification round, where it
+  costs a turn. Hygiene findings write `green_when: n/a (hygiene)`.
 - **`reachable`** is the field that separates a finding from trivia. "Any
   unauthenticated caller via POST /orders" is a finding. "A developer editing
   this file by hand" is not. If the only path to it is someone already having
