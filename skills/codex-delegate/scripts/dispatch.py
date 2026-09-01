@@ -632,8 +632,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--codex-home", default=Path.home() / ".codex-worker", type=Path)
     ap.add_argument("--mcp", action="append", default=[], metavar="NAME",
                     help="grant this MCP server for this task (repeatable)")
-    ap.add_argument("--model", default=None)
-    ap.add_argument("--effort", default="high")
+    ap.add_argument("--model", default=None,
+                    help="model id for this lane; overrides the config default. "
+                         "Tier per lane rather than editing config between lanes.")
+    ap.add_argument("--effort", default="high",
+                    help="reasoning effort for this lane (low|medium|high|xhigh|"
+                         "max|ultra). Not every model offers every level, and an "
+                         "unsupported pairing fails the turn as turn/failed with "
+                         "the reason only in RAW_OUTPUT.log - confirm the pairing "
+                         "against the account's model list before relying on it.")
     ap.add_argument("--sandbox", default="workspace-write",
                     choices=["read-only", "workspace-write"])
     ap.add_argument("--timeout", type=int, default=3600, help="seconds before giving up")

@@ -334,7 +334,41 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
   --timeout 3600
   # --mcp <name>          per granted server, registered in §3
   # --sandbox read-only   for review lanes
+  # --model <id>          per lane - overrides the config default, see below
+  # --effort <level>      per lane - low|medium|high|xhigh|max, default high
 ```
+
+**Two dials, and the saving comes from choosing which one to cut.** Model and
+reasoning effort are set per lane and the flags override whatever
+`~/.codex-worker/config.toml` holds, so tiering never means editing config
+between lanes. The tier that held up in the field: **the cheaper model at
+maximum effort as the default**, and the expensive model at **medium** effort
+reserved for lanes where a missed defect is expensive. Spending goes up on the
+resource the lane actually needs and down on the other one - which is not the
+same as running everything cheaper, and not the same as running everything
+hard.
+
+"Expensive" is decided by the cost of being wrong, not by the size of the
+work: silent data loss, an authorization or privacy boundary, a termination
+contract - anything whose defect would live in production unnoticed. Style,
+dead code, test coverage and documentation consistency go to the default lane.
+
+Measured over a five-lane audit: two lanes on the expensive model at medium
+and three on the cheap model at max sat at **56% of a five-hour usage
+window**, where running every lane on the expensive model would have exhausted
+it before the audit finished. In the same run the cheap lanes produced three
+to four times the transcript of the expensive ones and still cost less -
+**transcript volume is not a proxy for spend**, and reasoning from one to the
+other gets the tier backwards.
+
+**Confirm the pairing before you rely on it, because a bad one fails
+silently.** Not every model offers every effort level, and dispatch.py drops a
+turn whose effort the model does not support as `turn/failed` - the reason
+stays in `RAW_OUTPUT.log` and nothing else says a word. List what the account
+actually has once (`app-server`'s `model/list`, under the worker's
+`CODEX_HOME`) rather than assuming the levels carry across models: at the time
+of writing one tier offered up to `max` and no `ultra`, the other offered
+`ultra` as well.
 
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
