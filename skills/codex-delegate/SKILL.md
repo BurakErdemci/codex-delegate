@@ -557,10 +557,24 @@ Steps 1 and 2 are one command - the same script that opened the lane closes it:
 # them first, or pass --force if they are genuinely disposable.
 ```
 
-1. **Archive the contract:** copy `SPEC.md`, `turn-*.md`, `FINAL.txt`,
-   `ROUNDS.txt` to `<main-repo>/.delegate-runs/ARCHIVE/<task-id>/`. Until the
-   user reviews the uncommitted diff, the spec is the only record of what was
-   sanctioned - deleting it with the worktree orphans the diff.
+1. **Archive the contract, then verify the archive, then delete.** The order
+   binds, and the middle step is the one that gets skipped: `close` copies
+   `SPEC.md`, `turn-*.md`, `FINAL.txt`, `ROUNDS.txt` and the findings tree to
+   `<main-repo>/.delegate-runs/ARCHIVE/<task-id>/`, compares every copy against
+   its source by sha256, writes `MANIFEST.sha256`, and only then removes the
+   worktree. A mismatch stops the removal and leaves the lane intact.
+
+   The step exists because a copy that silently did not happen looks exactly
+   like one that did, and the next command is irreversible: in one field round
+   nine lanes were removed with their outputs uncopied, and every proof script
+   and finding text in them is unrecoverable. Existence alone is not the test
+   either - a truncated destination passes that - so the check compares
+   content.
+
+   **`.delegate-runs/` is gitignored, so an empty-looking lane can be full.**
+   `git status --porcelain` in a lane says nothing about the run directory,
+   which is exactly where the archive's contents live. Never read a clean
+   status as "there is nothing to archive here".
 2. **Remove the worktree and its trust entry:**
    `git worktree remove --force "$LANE"`, then `git worktree prune`, then
    `doctor.py --untrust "$LANE"`. Not optional, not deferrable: accumulated

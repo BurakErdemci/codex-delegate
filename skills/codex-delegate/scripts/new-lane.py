@@ -25,6 +25,7 @@ growing trust list were the measured cost of leaving it to memory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -68,6 +69,14 @@ NOTE FOR THIS TASK: this is an AUDIT task. You produce no product code and you
 fix nothing. Your output is findings files and runnable probes, on disk, under
 the task dir. The contract below is binding and is not a summary of it.
 """
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def git(args: list[str], cwd: Path | None = None, check: bool = True) -> str:
@@ -467,6 +476,7 @@ def cmd_close(args: argparse.Namespace) -> int:
     archive = repo / ".delegate-runs" / "ARCHIVE" / args.task_id
     archive.mkdir(parents=True, exist_ok=True)
     kept = []
+    copied = []                               # source files the archive must match
     if td.is_dir():
         for item in sorted(td.iterdir()):
             if item.name in ("RAW_OUTPUT.log", "PROMPT.txt", "finding-contract.md"):
@@ -474,8 +484,10 @@ def cmd_close(args: argparse.Namespace) -> int:
             dest = archive / item.name
             if item.is_dir():
                 shutil.copytree(item, dest, dirs_exist_ok=True)
+                copied.extend(p for p in sorted(item.rglob("*")) if p.is_file())
             else:
                 shutil.copyfile(item, dest)
+                copied.append(item)
             kept.append(item.name)
     raw = td / "RAW_OUTPUT.log"
     if raw.is_file():
@@ -490,9 +502,39 @@ def cmd_close(args: argparse.Namespace) -> int:
         (archive / "RAW_OUTPUT.tail.log").write_text("\n".join(slice_) + "\n",
                                                      encoding="utf-8")
         kept.append(f"RAW_OUTPUT.tail.log ({len(marked)} approval lines + tail)")
+    # Verify the archive BEFORE the irreversible step. A copy that silently
+    # did not happen looks exactly like one that did, and the next line
+    # destroys the original: a field round removed nine lanes this way and
+    # lost every proof script and finding text they held. Existence is not
+    # enough either - a truncated or empty destination passes that check -
+    # so compare content.
+    mismatch = []
+    for src in copied:
+        dest = archive / src.relative_to(td)
+        try:
+            if not (dest.is_file() and _digest(dest) == _digest(src)):
+                mismatch.append(str(src.relative_to(td)))
+        except OSError as exc:
+            mismatch.append(f"{src.relative_to(td)} ({exc.strerror})")
+    if mismatch:
+        print("BLOCK: the archive does not match the lane - worktree NOT removed.")
+        for name in mismatch[:20]:
+            print(f"  ! {name}")
+        if len(mismatch) > 20:
+            print(f"  ... and {len(mismatch) - 20} more")
+        print(f"Archive: {archive}")
+        print("Free space, permissions and path length are the usual causes.")
+        print("Fix the archive, then run close again - the lane is still intact.")
+        return 1
+    manifest = [f"{_digest(archive / p.relative_to(td))}  {p.relative_to(td)}"
+                for p in copied]
+    (archive / "MANIFEST.sha256").write_text(
+        "\n".join(manifest) + "\n", encoding="utf-8")
+
     print(f"archived -> {archive}")
     for name in kept:
         print(f"  + {name}")
+    print(f"  verified {len(copied)} file(s) by sha256 -> MANIFEST.sha256")
 
     git(["worktree", "remove", "--force", str(lane)], cwd=repo)
     git(["worktree", "prune"], cwd=repo)
