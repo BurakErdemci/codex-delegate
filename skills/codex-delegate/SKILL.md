@@ -389,6 +389,34 @@ runs is wedged regardless of what `ps` says. dispatch.py kills the worker at
 `--timeout` and exits non-zero, so the ceiling is enforced - but check log
 growth when a lane feels slow instead of waiting the timeout out.
 
+**Write commands the approval filter can approve.** dispatch.py judges every
+command argv token by token and declines anything that names a location
+outside the lane - absolute paths, home references (`~`, `$HOME`,
+`%USERPROFILE%`), and location variables (`%TEMP%`, `$env:TEMP`, `%APPDATA%`,
+`%LOCALAPPDATA%`, `%PROGRAMDATA%`, `%PUBLIC%`). The filter is deliberately
+blunt, so the brief has to meet it. Three rules, each one a measured false
+positive - a lane that a filter had been starving across several rounds ran
+**23 approvals, 0 declines, rc=0** once the brief carried them:
+
+1. **Build fixtures inside the lane**, at `.delegate-runs/<lane>/fixtures/`.
+   A test tree created with `tempfile.mkdtemp()` lands in the system temp
+   directory, which is outside the lane, and every path derived from it is
+   declined.
+2. **Put container paths inside the program text, not in argv.** A container
+   path handed over as its own argument (`docker run ... /workspace/case`) is
+   indistinguishable from a host absolute path; pass it inside the `-c`
+   program string instead, where it is data rather than an operand.
+3. **No argument may begin with `/` or `\`.** This one bites where you least
+   expect it: the regex fragments `'\(e\)|return'` and `'\{'` were read as a UNC
+   path and declined. Anchor patterns differently, or pass them through a
+   file.
+
+The real cure belongs in the tool, and is not there yet: the filter cannot
+know that argv after `docker` belongs to another namespace, and cannot tell a
+regex from a path. Until it can, the brief carries that burden - which is why
+these three lines belong in the brief itself, not in a troubleshooting page
+read after a round has already been starved.
+
 **Check dispatch.py's exit code BEFORE reading FINAL.txt** - and read `5` as
 its own case, not as one more failure:
 

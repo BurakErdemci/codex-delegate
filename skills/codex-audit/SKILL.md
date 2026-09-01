@@ -284,6 +284,16 @@ the worker was starved of permissions), `1` failed or refused, `2/3/4`
 preflight. Read the verdict before FINAL.txt, and remember §3's other rule: a
 lane reporting zero findings is not a clean lens until you have read the tail
 of its `RAW_OUTPUT.log`.
+**On `rc=5`, read the findings directory before you judge the round.** An audit
+lane writes findings to disk as it goes, so a starved turn is not an empty one:
+measured across four audit rounds, every `rc=5` round still carried sound
+findings, and the declines had cost individual commands rather than the lens.
+The order that holds: read `findings/`, then grep `^\[decline\]` in
+`RAW_OUTPUT.log` to see which commands were denied and whether any finding
+depended on one, then decide whether the lens needs a re-run. Re-dispatching on
+the exit code alone pays for a round that already delivered - and the fix is
+usually three lines in the brief, not another turn (see codex-delegate SKILL.md
+§5, "Write commands the approval filter can approve").
 
 
 Closing is `new-lane.py close --lane "$LANE" --task-id "$TASK_ID"`: it archives
