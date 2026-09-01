@@ -411,6 +411,24 @@ toolchain, either install it into the lane before dispatch (`codex-delegate`
 §4) or say in the brief that this lens ships static reasoning, and label its
 findings accordingly.
 
+**Before installing anything, try linking what the main tree already has.**
+For an interpreted project the environment is usually a directory, and a
+symlink from the lane to the main tree's is cheaper than an install and needs
+no network. Measured: symlinking the main tree's `.venv` into a lane made
+`import` work where a bare interpreter could not find the package at all, and
+the lens went from writing `unverified` claims to running a real behavioural
+probe and returning `verified-empirically`. The same round measured the other
+end of the range: a compiled toolchain could not be linked or installed, and
+**20 of 20 findings from that lens came back `unverified`** - which is the
+signal to write the closing test in the main tree instead of buying it at lane
+price.
+
+The third case is the cheap one and worth checking first: a project with **no
+dependencies at all** needs neither the install nor the link. A zero-dependency
+repo ran its full suite inside a lane with no `node_modules` directory present
+- so ask what the toolchain actually requires before assuming a lane cannot
+have it.
+
 ### Width is what breaks - route by lens count
 
 Codex has real subagents (`spawn_agent`, `wait_agent`, `list_agents` - runtime
