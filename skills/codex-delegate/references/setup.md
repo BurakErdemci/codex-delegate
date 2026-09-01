@@ -101,8 +101,19 @@ logged out or signed in to another account". The CLI works fine the whole time,
 which makes this look like anything but an auth problem.
 
 `--init` links the two files so they cannot diverge, and `--check` compares the
-account ids. API-key auth is untested; `--check` skips the comparison for it
-and says so.
+account ids and reports how old the worker's login is - warning past 30 days,
+because the worker home is a separate identity that goes stale on its own
+schedule. API-key auth is untested; `--check` skips the comparison for it and
+says so.
+
+**The CLI working proves nothing about the lanes.** Measured: four lanes
+dispatched in parallel died in the first second with `status='failed'`,
+`codexErrorInfo='unauthorized'` and "refresh token was revoked", while `codex
+exec` from the main home answered normally - because that is a different home
+with a different token. A worker profile untouched for a month turned out to
+belong to a different account than the operator expected. Run `--check` before
+a fan-out rather than after it: it costs one command, and the alternative is
+burning an entire round of lanes to find out.
 
 ## Why the run directory is `.delegate-runs/`
 
