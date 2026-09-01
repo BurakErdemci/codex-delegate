@@ -285,6 +285,7 @@ preflight. Read the verdict before FINAL.txt, and remember §3's other rule: a
 lane reporting zero findings is not a clean lens until you have read the tail
 of its `RAW_OUTPUT.log`.
 
+
 Closing is `new-lane.py close --lane "$LANE" --task-id "$TASK_ID"`: it archives
 the findings, probes and contract into the main repo, removes the worktree and
 drops the trust entry. It refuses while the lane holds changes outside
@@ -746,8 +747,11 @@ closure is not the end; it is the entry to the final loop:
 1. **Dispatch one narrow verification lane over the fix diff.** Scope is the
    diff the fixes produced plus the closure claims - not the whole codebase,
    which is what keeps the round cheap. Brief per `references/lenses.md`'s
-   verification-brief section: these classes were closed by this diff; break
-   the fixes, and hunt what the diff introduced. The finding contract applies
+   verification-brief section: these classes were closed by this diff; measure
+   each closure claim against the set of inputs the class covers, and hunt what
+   the diff introduced. Write it as a measurement, not as an attack - this
+   brief carries the highest refusal risk in the plugin, and the framing is
+   what the classifier reads. The finding contract applies
    verbatim - a verification finding without a probe is a hypothesis here too.
 2. **Triage every returned finding with a written verdict.** A red team asked
    to look always finds something, so "it found things" is not the loop

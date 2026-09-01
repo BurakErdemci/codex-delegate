@@ -292,15 +292,27 @@ Used by SKILL.md §4's verification round, after Claude has fixed the confirmed
 findings. Same contract as every lens brief above; what changes is the target
 and the framing. Give the worker:
 
+**Write it as a measurement.** "Ask for a measurement, not for an attack"
+above applies here with more force than anywhere else in this file: a brief
+whose stated goal is to defeat a security fix is the single most
+refusal-shaped sentence the plugin emits. Measured in the field: the
+breaking framing died on the classifier repeatedly, the measuring framing has
+carried this round every time it was tried. The three directions below are
+therefore written as comparisons to run, not as attacks to mount - keep them
+that way when you fill in the specifics, and re-read the recipe before
+dispatching.
+
 - **the fix diff itself** (`git diff` of the fix commits or working tree), not
   the whole codebase - the round is cheap because the scope is small
 - **the closure claims**: each closed class, the variants that were checked,
   and what the fix was supposed to buy
 - three hunting directions, in priority order:
 
-> 1. **Break the fixes.** Each closed class comes with the claim "this diff
->    closes it". Treat the claim as the target: find an input, path, or
->    encoding through which the class still fires despite the fix.
+> 1. **Measure each closure claim.** Each closed class arrives with the claim
+>    "this diff closes it". That claim is a testable statement, so test it:
+>    determine the full set of inputs, paths and encodings the class covers,
+>    compare it against the set the fix actually handles, and report the
+>    difference as a table. Any row where the class still fires is a finding.
 > 2. **Hunt what the diff introduced.** A fix is new code written under
 >    pressure to make a probe go green. Look for what it broke, bypassed, or
 >    newly exposed - especially in the neighbouring code it touched.
