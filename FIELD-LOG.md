@@ -48,6 +48,81 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.9.0
+
+**The archive was copied and never checked, and the next line was
+irreversible.** `close` copied a lane's run directory into the main repo and
+then force-removed the worktree. A copy that silently did not happen looks
+exactly like one that did: nine lanes were removed this way in one round and
+every proof script and finding text in them is unrecoverable. Presence is not
+the test either - a truncated destination passes it - so `close` now compares
+every copy against its source by sha256, writes `MANIFEST.sha256`, and removes
+nothing unless everything matched. The mechanism already existed a few hundred
+lines up, where `open` verifies its own rollback; only the destructive path
+lacked it.
+→ `codex-delegate/SKILL.md` §9, `scripts/new-lane.py`
+
+**The approval filter's rules lived only in the code, so briefs kept walking
+into them.** Every argv token naming a location outside the lane is declined,
+and three false positives cost repeated rounds: fixtures built with
+`mkdtemp()` land in the system temp directory, a container path passed as its
+own argument is indistinguishable from a host absolute path, and a leading
+backslash makes a regex fragment look like a UNC path. Written into the brief
+instead, a lane that had been starving ran 23 approvals and 0 declines.
+→ `codex-delegate/SKILL.md` §5
+
+**`rc=5` was being read as a failed round.** It means the turn completed with
+some commands denied. Across four audit rounds every such round still carried
+sound findings, so the order is: read `findings/`, then the decline lines, then
+decide. Re-dispatching on the exit code alone pays twice for a round that
+already delivered.
+→ `codex-audit/SKILL.md` §3
+
+**The refusal antidote was bound to every brief except the riskiest one.**
+v2.8.0 added "ask for a measurement, not for an attack" and attached it to the
+hunter lenses, leaving it off the verification brief - the one text whose
+stated goal is to defeat a security fix. The breaking framing kept dying on the
+provider's classifier; the measuring framing carried the round every time.
+→ `codex-audit/references/lenses.md`
+
+**Two dials were being used as one.** Model and reasoning effort are both
+per-lane, and neither was documented, so every lane inherited the config
+default. Tiering the two independently - the cheaper model at max effort by
+default, the expensive one at medium only where a missed defect would live in
+production unnoticed - held five lanes at 56% of a five-hour window where
+running them all expensive would have exhausted it. The same run killed a
+tempting inference: the cheap lanes produced three to four times the transcript
+and still cost less, so transcript volume is not a proxy for spend. An
+unsupported model/effort pairing fails the turn as `turn/failed` with the
+reason only in `RAW_OUTPUT.log`.
+→ `codex-delegate/SKILL.md` §5, `scripts/dispatch.py`
+
+**The worker login is a separate identity and rots on its own schedule.** Four
+lanes died in the first second with a revoked refresh token while `codex exec`
+from the main home answered normally - a different home, a different token,
+and a profile untouched for a month belonging to a different account than
+expected. `--check` compared account ids but never the age; it now warns past
+30 days.
+→ `scripts/doctor.py`, `codex-delegate/references/setup.md`
+
+**A lane's environment can often be linked instead of installed.** The
+toolchain section jumped from "a worktree carries no environment" to "install
+it or accept static reasoning". Symlinking the main tree's `.venv` into a lane
+turned a lens that could only write `unverified` claims into one that ran a
+real probe and returned `verified-empirically`. The other end of the range was
+measured in the same round: a compiled toolchain could be neither linked nor
+installed and returned 20 of 20 findings unverified.
+→ `codex-audit/SKILL.md` §3
+
+**The setup page taught an idiom SKILL.md had already replaced.** The
+`SKILL_DIR` lookup was corrected in SKILL.md - `-maxdepth 10` because the
+installed path is 8 levels deep, `sort -V | tail -1` because `-print -quit`
+picked 2.4.0 out of a cache that also held 2.5.0 - while the page a new
+install actually follows kept handing over the broken form.
+→ `codex-delegate/references/setup.md`
+
+---
+
 ## v2.8.0
 
 **The fix was the last unaudited surface.** The flow was: red team finds,
