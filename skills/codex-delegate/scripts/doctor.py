@@ -371,6 +371,16 @@ def cmd_check(home: Path) -> int:
                  f"({work_id} vs {main_id}); run --init to relink")
         problems += 1
     else:
+        # --init links the two auth files so they cannot diverge, but the link
+        # is a symlink and Windows refuses it without privileges, so --init
+        # falls back to a copy and says so once. --check never repeated it,
+        # which left the platform where divergence is permanent as the one
+        # place nothing kept mentioning the risk.
+        link = home / "auth.json"
+        if not link.is_symlink():
+            say(WARN, f"{link} is a copy, not a link to {MAIN_HOME / 'auth.json'} - "
+                      "the two can diverge, and `codex login` only writes the main "
+                      "home. Re-run --init after every login on this machine.")
         age = auth_age_days(work_at)
         # The worker home is a separate identity from the main one and goes
         # stale on its own schedule. Measured: a worker profile untouched for a

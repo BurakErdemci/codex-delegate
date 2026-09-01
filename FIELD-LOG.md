@@ -48,6 +48,21 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.9.1
+
+**The platform where the auth files always diverge was the one place nothing
+said so.** `--init` symlinks the worker's `auth.json` to the main home so the
+two cannot drift, but Windows refuses the symlink without privileges, so
+`--init` falls back to a copy and warns - once, at install time. `--check`
+then reported "login matches main home" forever after, comparing account ids
+at that instant and saying nothing about the copy underneath. Found by
+inspection on a Windows install: two `auth.json` files, different inodes,
+different contents, different `last_refresh` stamps. `--check` now reports
+whether the worker's login is a link or a copy.
+→ `scripts/doctor.py`
+
+---
+
 ## v2.9.0
 
 **The archive was copied and never checked, and the next line was
