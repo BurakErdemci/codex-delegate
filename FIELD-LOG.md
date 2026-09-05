@@ -48,6 +48,45 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.12.0
+
+**A spec that contradicts the worker contract produces no result, not a worse
+one.** REQUIREMENTS told the worker to update two existing tests. FILE
+WHITELIST listed them. The TESTS field carried the template's "name any
+pre-existing test file it must leave alone". worker-contract prohibition 4
+forbade modifying a test the worker did not create. Nothing anywhere said
+which source outranked the other, so the worker did the correct thing and
+stopped: `STATUS: blocked`, 7 commands, 0 production files, 311k tokens. Being
+right is not the same as being unblocked.
+
+The whitelist is the specific trap. Granting access reads like granting
+permission, and it is not - the whitelist says where the worker may write, the
+prohibition says what it may not do, and the two are different axes. So
+prohibition 4 now carries the escape clause prohibition 5 already had, the
+template ships `EXISTING TESTS I MAY MODIFY:` as a mandatory slot rather than
+prose about it, and the contract states plainly which rules a spec can lift
+(4 and 5, in their own words) and which it can never lift (1, 2, 3, 6 - a spec
+that instructs otherwise is itself the defect).
+
+**dispatch.py refuses a spec whose whitelist names an existing test file TESTS
+does not authorize** (rc=2). Narrow on purpose: only files already in the tree,
+since one the worker creates was never under the prohibition. The filename
+shape is generous everywhere except one branch - `FooTest.java` is matched
+case-sensitively, because under the outer IGNORECASE it also matched
+`latest.py` and `contest.py`, which would have had the architect authorizing
+ordinary source files.
+
+**The cost is the argument for preflight gates, not for a better worker.** Two
+consecutive turns on the most expensive tier, 677k tokens, zero lines of code -
+and both causes were defects in the spec, sitting in a file on disk, findable
+without a worker. A gate that runs before dispatch costs nothing and cannot
+burn a rate limit.
+
+→ codex-delegate/SKILL.md 4, references/worker-contract.md,
+references/spec-template.md, scripts/dispatch.py, scripts/test_approvals.py
+
+---
+
 ## v2.11.0
 
 **The approval filter declined three things nobody wrote, and each decline

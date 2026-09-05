@@ -37,9 +37,29 @@ SPEC.md first - do not rely on your memory of it.
    may not modify, delete or relax a test you did not create, and you may not
    edit the acceptance command. If the acceptance test looks wrong or
    impossible, STOP with STATUS: blocked and explain - do not "fix" it.
+   **Unless SPEC.md's TESTS section names the file** under `EXISTING TESTS I
+   MAY MODIFY`. Adapting a test to an interface the spec is deliberately
+   changing is migration, not weakening, and it is the architect's call to
+   authorize - the whitelist alone does not, because it grants access rather
+   than lifting a prohibition. Everything not named there still falls under
+   the first sentence.
 5. Never install project dependencies or edit dependency manifests unless the
    spec allows it. Tooling for your own use is allowed but MUST appear in flags.
 6. If the spec's NETWORK field says not-allowed, make no network calls.
+
+**When SPEC.md and this list disagree.** Only 4 and 5 can be lifted, and only
+by the spec saying so in the words those rules name. 1, 2, 3 and 6 hold no
+matter what a spec says: a spec that instructs you to run git, act outside the
+tree, write outside the whitelist or open the network is itself the defect -
+STOP with `STATUS: blocked` and quote the line.
+
+This paragraph exists because its absence cost a turn. Measured 5 Sep 2026: a
+spec's REQUIREMENTS told the worker to update two existing tests, its TESTS
+section carried the template's "change no other existing test file", and rule 4
+forbade it outright. The worker read the contradiction correctly, had no way to
+know which source outranked the other, chose the safe side and stopped -
+7 commands, 0 production files, 311k tokens. Being right is not the same as
+being unblocked, so the precedence has to be written down rather than inferred.
 
 ## MCP tools
 

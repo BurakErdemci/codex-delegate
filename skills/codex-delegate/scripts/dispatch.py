@@ -246,28 +246,104 @@ def scan_tokens(tokens: list[str], lane_root: Path, cwd: str, *,
     return None
 
 
-def acceptance_tokens(spec_text: str) -> list[str]:
-    """Command tokens under SPEC.md's ## ACCEPTANCE heading.
+def spec_section(spec_text: str, name: str) -> list[str]:
+    """Content lines under the named SPEC.md heading, bullets and noise removed.
 
-    Placeholder lines (the <angle-bracket> prose the template ships) and
-    fenced-code markers are dropped, so an unfilled template scans clean and
-    the gate below stays quiet until there is a real command to judge.
+    Placeholder lines (the <angle-bracket> prose the template ships) and fence
+    markers are dropped, so an unfilled template reads as empty and every gate
+    built on this stays quiet until there is something real to judge.
     """
-    tokens: list[str] = []
+    lines: list[str] = []
     inside = False
     for line in spec_text.splitlines():
         stripped = line.strip()
         if stripped.startswith("#"):
-            inside = stripped.lstrip("#").strip().upper().startswith("ACCEPTANCE")
+            inside = stripped.lstrip("#").strip().upper().startswith(name)
             continue
         if not inside or not stripped or stripped.startswith(("```", ">", "<")):
             continue
         # Drop a markdown bullet, and ONLY a bullet. A blanket lstrip of the
         # bullet characters ate the leading ./ of ./scripts/gate.sh, which the
         # scan then read as the rooted /scripts/gate.sh and blocked.
-        stripped = re.sub(r"^(?:[-*+]|\d+\.)\s+", "", stripped)
-        tokens.extend(stripped.split())
-    return tokens
+        lines.append(re.sub(r"^(?:[-*+]|\d+\.)\s+", "", stripped))
+    return lines
+
+
+def acceptance_tokens(spec_text: str) -> list[str]:
+    """Command tokens under SPEC.md's ## ACCEPTANCE heading."""
+    return [tok for line in spec_section(spec_text, "ACCEPTANCE")
+            for tok in line.split()]
+
+
+# Filename shapes every mainstream runner treats as a test. Deliberately
+# generous: a false hit costs one line in the spec's authorization field, while
+# a miss costs the whole turn this gate exists to save.
+_TEST_SHAPE = re.compile(
+    r"(^|[/\\])(tests?|__tests__|spec)([/\\]|$)"
+    r"|(^|[/\\])test_[^/\\]*$"
+    r"|_test\.[^/\\]+$|\.(test|spec)\.[^/\\]+$"
+    # FooTest.java / MyClassTest.cs - case-SENSITIVE on purpose. Under the
+    # outer IGNORECASE this branch also matched latest.py and contest.py,
+    # which would have made the architect authorize ordinary source files.
+    r"|(?-i:[A-Za-z0-9]Test)\.[^/\\]+$",
+    re.IGNORECASE)
+
+_AUTHORIZED_TESTS_MARKER = "EXISTING TESTS I MAY MODIFY:"
+
+
+def whitelist_paths(spec_text: str) -> list[str]:
+    """Paths under ## FILE WHITELIST, with the template's (new) marker and any
+    trailing `# comment` removed."""
+    paths: list[str] = []
+    for line in spec_section(spec_text, "FILE WHITELIST"):
+        line = line.split("#", 1)[0].strip()
+        line = re.sub(r"^\(new\)\s*", "", line, flags=re.IGNORECASE).strip()
+        if line and not line.startswith("("):
+            paths.append(line.strip("`'\""))
+    return paths
+
+
+def authorized_tests(spec_text: str) -> set[str]:
+    """Paths the spec explicitly authorizes the worker to modify.
+
+    A dedicated slot rather than prose, because this project has measured the
+    difference: a rule the worker must infer from wording produced the
+    deliverable in 1 lane out of 6, and a slot to fill produced it every time.
+    """
+    named: set[str] = set()
+    for line in spec_text.splitlines():
+        head, sep, rest = line.strip().partition(_AUTHORIZED_TESTS_MARKER)
+        if not sep or head.lstrip("*_- ").strip():
+            continue
+        for item in re.split(r"[,\s]+", rest.strip()):
+            item = item.strip("`'\"*_")
+            if item and item.lower() != "none":
+                named.add(item.replace("\\", "/").lstrip("./"))
+    return named
+
+
+def unauthorized_test_edits(spec_text: str, lane_root: Path) -> list[str]:
+    """Whitelisted test files that already exist and are not authorized.
+
+    Each one is a turn the worker will spend reading, reasoning, and stopping.
+    worker-contract prohibition 4 forbids touching a test it did not create,
+    the whitelist grants access rather than lifting that prohibition, and the
+    worker cannot tell which outranks the other - so it takes the safe side.
+    Measured 5 Sep 2026: 7 commands, 0 production files, 311k tokens, blocked.
+    """
+    allowed = authorized_tests(spec_text)
+    offenders = []
+    for path in whitelist_paths(spec_text):
+        if "*" in path or "?" in path or not _TEST_SHAPE.search(path):
+            continue
+        normalized = path.replace("\\", "/").lstrip("./")
+        if normalized in allowed:
+            continue
+        # Only files already in the tree: one the worker creates is its own,
+        # and prohibition 4 never applied to it.
+        if (lane_root / path).is_file():
+            offenders.append(path)
+    return offenders
 
 
 def acceptance_verdict(spec_text: str, lane_root: Path) -> tuple[str, str] | None:
@@ -826,6 +902,26 @@ def run(args: argparse.Namespace) -> int:
         except OSError as exc:
             print(f"ERROR: cannot read {spec_file}: {exc}", file=sys.stderr)
             return 1
+        blocked_tests = unauthorized_test_edits(spec_text, args.repo)
+        if blocked_tests:
+            listed = "\n".join(f"    {p}" for p in blocked_tests)
+            print(
+                "ERROR: SPEC.md whitelists existing test files the worker is not\n"
+                "authorized to modify, so it will stop instead of working:\n"
+                f"{listed}\n"
+                "worker-contract prohibition 4 forbids touching a test it did not\n"
+                "create, and FILE WHITELIST does not lift it - the whitelist grants\n"
+                "access, the prohibition is about authority. Measured 5 Sep 2026: the\n"
+                "worker read the contradiction correctly, took the safe side, and the\n"
+                "turn ended with 0 production files.\n"
+                "Fix: add a line to SPEC.md's TESTS section -\n"
+                f"    {_AUTHORIZED_TESTS_MARKER} <the paths above>\n"
+                "and check the acceptance command can still pass once they are\n"
+                "adapted. If they genuinely must not change, drop them from the\n"
+                "whitelist instead.",
+                file=sys.stderr,
+            )
+            return 2
         verdict = acceptance_verdict(spec_text, args.repo)
         if verdict:
             token, reason = verdict

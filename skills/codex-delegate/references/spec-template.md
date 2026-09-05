@@ -44,8 +44,26 @@ Example:
 
 ## TESTS
 <What the worker's own unit checks must cover. The worker writes these; they are
- its safety net, not the acceptance bar. Name any pre-existing test file it must
- leave alone.>
+ its safety net, not the acceptance bar.>
+
+EXISTING TESTS I MAY MODIFY: <paths already in the tree the worker is
+ authorized to adapt, or `none`>
+<Mandatory, and `none` is a real answer - the field is the ONLY thing that
+ lifts worker-contract prohibition 4 ("may not modify a test you did not
+ create"). Listing a file in FILE WHITELIST does NOT lift it: the whitelist
+ grants access, the prohibition is about authority, and the worker cannot tell
+ which outranks the other.
+
+ Measured 5 Sep 2026: REQUIREMENTS said "update the two old tests", the old
+ wording of this field said "change no other existing test file", and rule 4
+ forbade it. The worker read all three correctly, took the safe side and
+ stopped - 7 commands, 0 production files, 311k tokens, one turn gone. If the
+ goal changes an interface that existing tests assert against, those tests
+ belong here, and the acceptance command has to be able to pass with them
+ adapted - otherwise the contradiction is in the acceptance bar too.
+
+ dispatch.py refuses a spec whose whitelist carries an existing test file this
+ field does not name.>
 
 ## ACCEPTANCE
 <ONE runnable, self-contained command using a project-local runner. The architect

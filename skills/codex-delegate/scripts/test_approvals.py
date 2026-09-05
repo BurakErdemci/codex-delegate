@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 from pathlib import Path
 
 _SRC = Path(__file__).with_name("dispatch.py")
@@ -101,6 +102,53 @@ def check_acceptance() -> int:
     return failures
 
 
+# The other pre-dispatch gate: a whitelisted EXISTING test file the spec does
+# not authorize. Needs real files on disk, so it builds a throwaway tree.
+# (expected, whitelist body, tests body, files to create, why)
+TEST_EDIT_CASES = [
+    ("block", "- src/a.py\n- tests/test_old.py", "Cover the new path.",
+     ["tests/test_old.py"],
+     "the measured failure: whitelisted, exists, unauthorized -> worker stops"),
+    ("pass", "- src/a.py\n- tests/test_old.py",
+     "Cover the new path.\nEXISTING TESTS I MAY MODIFY: tests/test_old.py",
+     ["tests/test_old.py"], "authorized by the slot the template now ships"),
+    ("pass", "- src/a.py\n- (new) tests/test_new.py", "Cover the new path.",
+     [], "a test the worker creates was never under prohibition 4"),
+    ("pass", "- src/a.py\n- tests/test_old.py", "EXISTING TESTS I MAY MODIFY: none",
+     [], "whitelisted but not in the tree yet - the worker creates it"),
+    ("pass", "- src/main.py\n- README.md", "EXISTING TESTS I MAY MODIFY: none",
+     ["src/main.py", "README.md"], "no test files at all; the gate must stay quiet"),
+    ("pass", "- .delegate-runs/t1/turn-*.md\n- src/a.py", "Cover it.",
+     [], "the changelog glob every spec carries must never trip this"),
+    ("block", "- app/__tests__/legacy.js", "Cover it.", ["app/__tests__/legacy.js"],
+     "js-style test directory"),
+    ("block", "- src/thing_test.go", "Cover it.", ["src/thing_test.go"],
+     "go-style suffix"),
+    ("pass", "- src/latest.py\n- src/contest.py", "Cover it.",
+     ["src/latest.py", "src/contest.py"],
+     "'test' inside a word is not a test file - the shape must not overreach"),
+]
+
+
+def check_test_edits(tmp: Path) -> int:
+    failures = 0
+    for i, (expected, wl, tests, files, why) in enumerate(TEST_EDIT_CASES):
+        lane = tmp / f"case{i}"
+        for rel in files:
+            target = lane / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("x", encoding="utf-8")
+        lane.mkdir(parents=True, exist_ok=True)
+        spec = f"# TASK t\n\n## FILE WHITELIST\n{wl}\n\n## TESTS\n{tests}\n"
+        offenders = dsp.unauthorized_test_edits(spec, lane)
+        got = "block" if offenders else "pass"
+        ok = got == expected
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  tests-gate expected {expected:<5} "
+              f"got {got:<5} ({offenders or 'clean'})\n        {why}")
+    return failures
+
+
 def main() -> int:
     failures = 0
     for expected, method, params, why in CASES:
@@ -110,7 +158,9 @@ def main() -> int:
         print(f"{'ok  ' if ok else 'FAIL'}  expected {expected:<7} got {got:<7} "
               f"({reason})\n        {why}")
     failures += check_acceptance()
-    total = len(CASES) + len(ACCEPTANCE_CASES)
+    with tempfile.TemporaryDirectory() as tmp:
+        failures += check_test_edits(Path(tmp))
+    total = len(CASES) + len(ACCEPTANCE_CASES) + len(TEST_EDIT_CASES)
     print(f"\n{total - failures}/{total} cases hold")
     return 1 if failures else 0
 

@@ -295,6 +295,24 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
 Write `SPEC.md` from `references/spec-template.md` - every field, truthfully.
 If a field cannot be filled, the task is not delegation-ready (§0).
 
+**A spec that contradicts the worker contract does not produce a worse result -
+it produces no result.** The worker holds both documents, has no rule saying
+which outranks the other, and correctly takes the safe side: it stops. The
+whitelist is the usual trap, because granting access reads like granting
+permission and is not. Measured 5 Sep 2026: REQUIREMENTS said to update two
+existing tests, the whitelist listed them, prohibition 4 forbade touching a
+test the worker did not create, and the turn ended blocked after 7 commands
+and 311k tokens with 0 production files. Only prohibitions 4 and 5 can be
+lifted, and only by the spec's own words - `EXISTING TESTS I MAY MODIFY:` in
+TESTS, and the dependency clause in rule 5. `dispatch.py` refuses (rc=2) when
+the whitelist carries an existing test file TESTS does not name, but the gate
+only catches this one shape; read the spec against the contract yourself.
+
+Both preflight gates cost nothing and run before a worker exists. That matters
+most on the expensive tiers: two consecutive `gpt-6-astra` turns, 677k tokens
+total, produced zero lines of code, and both causes were defects in the spec
+rather than in the work.
+
 Build `PROMPT.txt`: the full contents of `references/worker-contract.md`,
 followed by one line:
 
