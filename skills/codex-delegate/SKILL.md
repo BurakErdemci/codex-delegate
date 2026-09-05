@@ -217,7 +217,9 @@ TASK_ID=$(date +%F)-<shortname>                    # e.g. 2026-07-26-inventory-u
 LANE="$(dirname "$PWD")/$(basename "$PWD")-lanes/$TASK_ID"   # the path open uses
 "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" --base "$BASE_SHA"
 # --mode audit|research for the sibling flows · --lane <path> for a short root
-# (see the MAX_PATH note below) · run it from the MAIN tree, never from a lane
+# (see the MAX_PATH note below) · --tool NAME=PATH to bridge an out-of-lane
+# interpreter (see the dependencies bullet) · run it from the MAIN tree, never
+# from a lane
 ```
 
 Set `LANE` yourself as above and check it against the `lane:` line the command
@@ -267,6 +269,24 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
   this failure, patched by hand.) `--trust` writes the entry.
 - **Install dependencies inside the lane** if acceptance needs them
   (`node_modules/` and friends do not come with a worktree).
+- **Bridge the interpreter the acceptance command needs, never name its path.**
+  A worktree gets no venv, so the interpreter is outside the lane by
+  construction - and the sandbox scans the command line and declines any token
+  that leaves the lane. A spec whose ACCEPTANCE calls the main tree's venv
+  therefore does not fail, it never runs: measured 5 Sep 2026, two turns, 0
+  files written, the reason visible only in RAW_OUTPUT.log.
+
+  ```bash
+  "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" \
+    --tool py="$PWD/Backend/venv/Scripts/python.exe"
+  # writes .delegate-runs/$TASK_ID/py.cmd and py.sh; ACCEPTANCE calls those
+  ```
+
+  The absolute path then lives inside a script, which the filter never reads,
+  instead of on the command line, which it scans. `.delegate-runs/` is already
+  excluded from the §6 footprint, so the bridges are not a scope violation.
+  `dispatch.py` scans ACCEPTANCE against the same filter and refuses the turn
+  (rc=2) rather than burning it, but the gate only tells you; this is the fix.
 - **Everything for a lane lives inside it**: `$LANE/.delegate-runs/$TASK_ID/`
   holds SPEC.md, PROMPT.txt, RAW_OUTPUT.log, FINAL.txt, ROUNDS.txt and the
   worker's `turn-N.md`. One location; removing the worktree removes all
@@ -478,7 +498,7 @@ its own case, not as one more failure:
 | `0` | turn completed, nothing declined | the worker's report |
 | `5` | turn completed, but approvals were **declined** - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
 | `1` | the turn failed, timed out, or the provider refused it | `DISPATCH FAILED: <reason>` - unless it died before the turn began (unreadable prompt file, no codex CLI), where there is no FINAL.txt and the reason is on stderr |
-| `2` `3` `4` | preflight: bad argument, toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
+| `2` `3` `4` | preflight: bad argument, **an ACCEPTANCE command the sandbox would decline** (§4's bridge bullet is the fix), toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
 
 `1` is the case that sends you to §10: read the last ~40 lines of
 RAW_OUTPUT.log for the cause, and never treat a stale report as this round's

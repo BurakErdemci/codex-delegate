@@ -48,6 +48,60 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.11.0
+
+**The approval filter declined three things nobody wrote, and each decline
+read as the worker misbehaving.** The scan that keeps a worker's writes inside
+its lane is lexical - it splits the command line and judges every token - so
+three shapes that are not paths were judged as paths. `cmd`'s own switches are
+slash-prefixed, and `cmd /c echo hi` was declined `absolute path outside lane:
+'/c'`: every cmd-wrapped command on Windows, the one platform the scan exists
+for. A PowerShell here-string carries its line breaks as the two characters
+`\` and `n`, and whitespace-splitting left fragments whose lone leading
+backslash read as a UNC path. Both are fixed narrowly - the switch
+exemption tests a shape (one letter, optional separator-free `:value`) and
+applies only when the program is `cmd`, so `/etc/passwd` and `sh -c` behave
+exactly as before.
+
+**The third one cost two whole turns, and it is not a filter bug.** A spec's
+ACCEPTANCE command named the main tree's venv by absolute path, because a
+worktree never has a venv. The sandbox declined it, so the worker could not run
+its own checks; the turn ended with 0 files written and the reason visible only
+in RAW_OUTPUT.log. dispatch.py now scans SPEC.md's ACCEPTANCE block through the
+same filter before spawning and refuses with rc=2, naming the token and the
+remedy. The remedy is `new-lane.py open --tool NAME=PATH`, which writes a
+lane-local `NAME.cmd`/`NAME.sh` around the outside executable: the absolute
+path then lives inside a script the filter never reads, rather than on the
+command line it scans. That is usability, not a hole - the sandbox contains
+writes, this scan is only a proxy, and a worker could already reach any
+executable through an approved shell.
+
+**The gate and the filter share one function, because the first draft did
+not.** Duplicating the loop made the gate block `cmd /c ...` that the live
+filter approves, within minutes of being written. A gate that disagrees with
+the thing it guards is worse than no gate: it stops work while enforcing a rule
+that does not exist. `scan_tokens` is now the single loop, and
+`scripts/test_approvals.py` pins both halves of the boundary - the false
+positives that must approve, and the escapes that must still decline. 22 cases,
+no processes, no I/O; `approval_decision` was written pure so that file could
+exist, and until now it did not.
+
+**A field note got the mechanism wrong in three places, and the fix would have
+been written against it.** The note claimed the filter rejects every
+out-of-lane absolute path (it exempts argv[0] as the program, by design), that
+it scans the content of file writes (file approvals read the path only - a
+changelog quoting an outside path is approved), and that the changelog failure
+came from that content scan (it came from the changelog being written through a
+shell one-liner, where its text is command line). Measured by calling
+`approval_decision` directly on each shape. Recorded here because acting on the
+note's proposed fix would have changed code that does not do what it was
+accused of.
+
+→ codex-delegate/SKILL.md 4 and 5, references/spec-template.md,
+scripts/dispatch.py, scripts/new-lane.py, scripts/test_approvals.py
+
+---
+
 ## v2.10.0
 
 **The tier map had no fan-out term, so it priced the wrong dial.** v2.9.0
@@ -431,9 +485,15 @@ Verified against the current tree. These are open, not forgotten.
   of a declined command - the evidence of an isolation attempt.
 - **The transcript never rotates.** It opens in append mode with no size cap,
   so repeated dispatches into one task directory grow it without bound.
-- **The worker model is hardcoded**, with no flag and no schema stamp on the
-  worker config, so a model change in a new release never reaches an existing
-  install and a user without access to that model fails at every dispatch.
+- **The worker config carries no schema stamp**, so a default change in a new
+  release never reaches an existing install, and a user without access to the
+  configured model fails at every dispatch until they notice. (`--model` and
+  `--effort` per lane landed in v2.10.0; the stale-default half is still open.)
+- **The approval scan is lexical, and that is a ceiling, not a bug to fix.**
+  It splits a command line and judges tokens, so it cannot tell a path operand
+  from a path-shaped string, and every false positive it has produced came from
+  that. It is a write-containment proxy for the OS sandbox Windows does not
+  run - not a security boundary, and it should never be read as one.
 - **MCP registration reads one config layer.** A server defined in another
   layer is reported as unregistered.
 - **Orphaned children on POSIX.** The process-tree kill exists on the Windows
