@@ -54,8 +54,12 @@ BASE_CONFIG = """\
 # Isolated Codex worker home, managed by the codex-delegate skill.
 # Deliberately minimal: no plugins, and no MCP servers beyond the ones you
 # hand over explicitly with `doctor.py --add-mcp`.
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
+# The floor of the tier map, not a recommendation: a lane dispatched without
+# --model/--effort should land on the cheapest tier, because an unflagged lane
+# is an unrecorded routing decision and the expensive default pays for it
+# silently. Tier up per lane with the flags (skills/codex-delegate SKILL.md 5).
+model = "gpt-5.6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]

@@ -148,6 +148,9 @@ Consequences, all deliberate:
 - **Practical ceiling ~20 concurrent workers** (RAM + provider rate limits;
   measured: a 23-lane run had 2 workers wedge on dead connections at startup).
   Default to <=4 lanes; go wider only when the task genuinely decomposes wide.
+  **The tier caps in §5 bind tighter than this number and are about spend,
+  not stability:** at most 3 `sol` lanes, exactly 1 `astra` lane. Only `luna`
+  lanes are free to reach this ceiling.
 - **Stagger spawns 2-5 s apart.** Same incident: the two wedged workers sat
   silent for 30 minutes. The stagger costs a minute; a zombie costs half an
   hour.
@@ -341,34 +344,49 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
 **Two dials, and the saving comes from choosing which one to cut.** Model and
 reasoning effort are set per lane and the flags override whatever
 `~/.codex-worker/config.toml` holds, so tiering never means editing config
-between lanes. The tier that held up in the field: **the cheaper model at
-maximum effort as the default**, and the expensive model at **medium** effort
-reserved for lanes where a missed defect is expensive. Spending goes up on the
-resource the lane actually needs and down on the other one - which is not the
-same as running everything cheaper, and not the same as running everything
-hard.
+between lanes. Route on **how hard the lane is**, then cap the fan-out by the
+tier you picked - the cap is half the rule, not a footnote to it.
 
-"Expensive" is decided by the cost of being wrong, not by the size of the
-work: silent data loss, an authorization or privacy boundary, a termination
-contract - anything whose defect would live in production unnoticed. Style,
-dead code, test coverage and documentation consistency go to the default lane.
+| Lane difficulty | Model | Effort | Parallel lanes |
+|---|---|---|---|
+| **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-5.6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
+| **Middling** - work that pushes back, ordinary review of real logic | `gpt-5.6-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
+| **Hardest** - core seams, the largest surfaces, anything whose defect would live in production unnoticed | `gpt-6-astra` | `high` | **1**, unless the user says otherwise |
 
-Measured over a five-lane audit: two lanes on the expensive model at medium
-and three on the cheap model at max sat at **56% of a five-hour usage
-window**, where running every lane on the expensive model would have exhausted
-it before the audit finished. In the same run the cheap lanes produced three
-to four times the transcript of the expensive ones and still cost less -
-**transcript volume is not a proxy for spend**, and reasoning from one to the
-other gets the tier backwards.
+(Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
+cheap-at-max plus expensive-at-medium, which had no fan-out term at all.)
+
+**Parallelism is the dial that ends the usage window, not the model name.**
+Six lanes on `sol` at `high` exhausts the limit outright - which is why the sol
+row caps at three lanes and drops to `medium` the moment a second sol lane
+opens, and why astra runs alone. Luna at `max` is the one tier you can fan out
+freely on cost grounds; §2's default of <=4 lanes still applies to it, for
+wedge risk rather than for spend.
+
+"Hardest" is decided by the cost of being wrong, not by the size of the work:
+silent data loss, an authorization or privacy boundary, a termination contract.
+Style, dead code, test coverage and documentation consistency go to the luna
+row no matter how many files they touch.
+
+Measured under the earlier two-tier rule, and the shape still holds: a
+five-lane audit with two lanes on the expensive model at medium and three on
+the cheap model at max sat at **56% of a five-hour usage window**, where
+running every lane on the expensive model would have exhausted it before the
+audit finished. In the same run the cheap lanes produced three to four times
+the transcript of the expensive ones and still cost less - **transcript volume
+is not a proxy for spend**, and reasoning from one to the other gets the tier
+backwards.
 
 **Confirm the pairing before you rely on it, because a bad one fails
 silently.** Not every model offers every effort level, and dispatch.py drops a
 turn whose effort the model does not support as `turn/failed` - the reason
 stays in `RAW_OUTPUT.log` and nothing else says a word. List what the account
-actually has once (`app-server`'s `model/list`, under the worker's
-`CODEX_HOME`) rather than assuming the levels carry across models: at the time
-of writing one tier offered up to `max` and no `ultra`, the other offered
-`ultra` as well.
+actually has (`app-server`'s `model/list`, under the worker's `CODEX_HOME`)
+rather than assuming the levels carry across models. Measured 5 Sep 2026 on
+codex-cli 0.153.4: `gpt-6-astra` and `gpt-5.6-sol` accept `low` through
+`ultra`; `gpt-5.6-luna` stops at `max` and has no `ultra`. Every pairing in the
+table above was checked against that list - re-check it after a CLI upgrade
+rather than inheriting this line.
 
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
