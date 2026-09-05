@@ -72,7 +72,7 @@ lane ran at `high` no matter what the file said - the known-broken list had
 been carrying this as an open item. The flag now defaults to nothing and the
 config's level stands when no lane overrides it.
 → `codex-delegate/SKILL.md` §2 and §5, `codex-audit/SKILL.md` §5,
-  `scripts/doctor.py`
+  `scripts/doctor.py`, `scripts/dispatch.py`
 
 ---
 
