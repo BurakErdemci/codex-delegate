@@ -68,6 +68,7 @@ if sys.version_info < (3, 11):
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -219,6 +220,74 @@ def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     return None
 
 
+def scan_tokens(tokens: list[str], lane_root: Path, cwd: str, *,
+                exempt_program: bool) -> tuple[str, str] | None:
+    """First (token, reason) the containment scan objects to, or None.
+
+    One loop for both callers - the live approval filter and the pre-dispatch
+    spec gate. They differed once, and the gate then blocked a command the
+    filter would have approved (`cmd /c ...`, because the switch exemption
+    lived in the caller). A gate that disagrees with the thing it guards is
+    worse than no gate: it stops work while reporting a rule nobody enforces.
+
+    exempt_program skips argv[0], which is the PROGRAM when Codex spawns
+    directly - every interpreter is outside the lane by definition. The spec
+    gate does not skip it, because a command reached through a shell has no
+    exempt first token, and that is how the field failure happened.
+    """
+    program = os.path.basename((tokens[0] if tokens else "").strip(_TOKEN_WRAP)).lower()
+    cmd_shell = program in ("cmd", "cmd.exe")
+    for token in (tokens[1:] if exempt_program else tokens):
+        if cmd_shell and _is_cmd_switch(token):
+            continue
+        reason = _token_verdict(token, lane_root, cwd)
+        if reason:
+            return token, reason
+    return None
+
+
+def acceptance_tokens(spec_text: str) -> list[str]:
+    """Command tokens under SPEC.md's ## ACCEPTANCE heading.
+
+    Placeholder lines (the <angle-bracket> prose the template ships) and
+    fenced-code markers are dropped, so an unfilled template scans clean and
+    the gate below stays quiet until there is a real command to judge.
+    """
+    tokens: list[str] = []
+    inside = False
+    for line in spec_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            inside = stripped.lstrip("#").strip().upper().startswith("ACCEPTANCE")
+            continue
+        if not inside or not stripped or stripped.startswith(("```", ">", "<")):
+            continue
+        # Drop a markdown bullet, and ONLY a bullet. A blanket lstrip of the
+        # bullet characters ate the leading ./ of ./scripts/gate.sh, which the
+        # scan then read as the rooted /scripts/gate.sh and blocked.
+        stripped = re.sub(r"^(?:[-*+]|\d+\.)\s+", "", stripped)
+        tokens.extend(stripped.split())
+    return tokens
+
+
+def acceptance_verdict(spec_text: str, lane_root: Path) -> tuple[str, str] | None:
+    """(token, reason) for the first ACCEPTANCE token the sandbox would decline.
+
+    Deliberately the SAME _token_verdict the live approval filter uses: a gate
+    that judges by its own rules can only disagree with the thing it guards,
+    and then both are wrong in a way neither reports.
+
+    Judges the FIRST token too, where the live filter exempts it as the
+    program. That is not stricter by accident. argv[0] is only the program
+    when Codex spawns the command directly; measured 5 Sep 2026, it reached
+    the acceptance command through a shell, the interpreter path became an
+    operand, and the turn died with 0 files written. A command that survives
+    only one of the two invocation styles is not an acceptance bar.
+    """
+    return scan_tokens(acceptance_tokens(spec_text), lane_root, str(lane_root),
+                       exempt_program=False)
+
+
 def enrich_file_change(params: dict, items_by_id: dict) -> dict:
     """Graft the cached fileChange item onto a path-less approval payload.
 
@@ -297,14 +366,9 @@ def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, 
         # every cmd-wrapped command on Windows, the one platform this scan
         # exists for, and the decline reason named a path nobody wrote.
         # Scoped to a cmd program so `sh -c` and friends are untouched.
-        program = os.path.basename((tokens[0] if tokens else "").strip(_TOKEN_WRAP)).lower()
-        cmd_shell = program in ("cmd", "cmd.exe")
-        for token in tokens[1:]:
-            if cmd_shell and _is_cmd_switch(token):
-                continue
-            reason = _token_verdict(token, lane_root, cwd_abs)
-            if reason:
-                return "decline", reason
+        objection = scan_tokens(tokens, lane_root, cwd_abs, exempt_program=True)
+        if objection:
+            return "decline", objection[1]
         return "approve", "command scoped to lane"
     # DECISION_APPROVALS may grow; a method this function does not understand
     # must never be approved by accident.
@@ -747,6 +811,36 @@ def run(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"ERROR: cannot read --prompt-file {args.prompt_file}: {exc}", file=sys.stderr)
         return 1
+
+    # The acceptance command is the one thing in SPEC.md the sandbox can veto,
+    # and it vetoes it silently: the turn burns, RAW_OUTPUT.log holds the
+    # decline, and FINAL.txt reports a worker that could not run its checks.
+    # Measured 5 Sep 2026 - two consecutive turns, 0 files written, because
+    # ACCEPTANCE called the main tree's venv by absolute path. Judging the spec
+    # against the same filter costs nothing and moves the failure to before the
+    # dispatch, where the architect is still holding the file.
+    spec_file = task_dir / "SPEC.md"
+    if spec_file.is_file():
+        try:
+            spec_text = spec_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"ERROR: cannot read {spec_file}: {exc}", file=sys.stderr)
+            return 1
+        verdict = acceptance_verdict(spec_text, args.repo)
+        if verdict:
+            token, reason = verdict
+            print(
+                f"ERROR: SPEC.md ACCEPTANCE would be declined by the sandbox - {reason}.\n"
+                f"  offending token: {token}\n"
+                f"  lane: {args.repo}\n"
+                "The worker cannot run an acceptance command that reaches outside its\n"
+                "lane, so this turn would end with nothing built. Put a bridge script\n"
+                "inside the lane and call that instead - new-lane.py open --tool\n"
+                "NAME=PATH writes one, and the path it wraps is never seen by the\n"
+                "filter because it lives in the script, not on the command line.",
+                file=sys.stderr,
+            )
+            return 2
 
     granted: list[str] = []
     if args.mcp:

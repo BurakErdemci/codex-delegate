@@ -68,6 +68,39 @@ CASES = [
 ]
 
 
+# The pre-dispatch spec gate, which must agree with the filter above. It once
+# did not: the switch exemption lived in approval_decision, so the gate blocked
+# `cmd /c ...` that the live filter approves. Both now share scan_tokens.
+# (expected, ACCEPTANCE body, why)
+ACCEPTANCE_CASES = [
+    ("pass", "cmd /c .delegate-runs\\t1\\py.cmd -m pytest -q",
+     "the bridged form the error message tells the architect to write"),
+    ("pass", "sh .delegate-runs/t1/py.sh -m pytest -q", "same, POSIX side"),
+    ("pass", "./scripts/gate.sh && npm test",
+     "a blanket bullet-strip ate the leading ./ and read it as /scripts"),
+    ("pass", "- ./scripts/gate.sh", "a real markdown bullet still comes off"),
+    ("pass", "<ONE runnable, self-contained command.>",
+     "an unfilled template must not block a dispatch"),
+    ("block", "C:/proj/venv/Scripts/python.exe -m pytest",
+     "the field failure: the main tree's venv, 2 turns, 0 files written"),
+    ("block", "npm test > %TEMP%\\out.txt", "location env vars"),
+    ("block", "cmd /c type /etc/passwd",
+     "the switch exemption must not smuggle a real POSIX path past the gate"),
+]
+
+
+def check_acceptance() -> int:
+    failures = 0
+    for expected, body, why in ACCEPTANCE_CASES:
+        verdict = dsp.acceptance_verdict(f"## ACCEPTANCE\n{body}\n", LANE)
+        got = "pass" if verdict is None else "block"
+        ok = got == expected
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  gate expected {expected:<5} got {got:<5} "
+              f"({verdict[1] if verdict else 'clean'})\n        {why}")
+    return failures
+
+
 def main() -> int:
     failures = 0
     for expected, method, params, why in CASES:
@@ -76,7 +109,9 @@ def main() -> int:
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'}  expected {expected:<7} got {got:<7} "
               f"({reason})\n        {why}")
-    print(f"\n{len(CASES) - failures}/{len(CASES)} cases hold")
+    failures += check_acceptance()
+    total = len(CASES) + len(ACCEPTANCE_CASES)
+    print(f"\n{total - failures}/{total} cases hold")
     return 1 if failures else 0
 
 
