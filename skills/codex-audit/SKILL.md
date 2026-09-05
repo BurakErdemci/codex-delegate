@@ -452,6 +452,17 @@ So the routing is conditional on lens count, never on enthusiasm:
   parallel and already isolated; a wide subagent tree buys nothing but a
   coordinator that fails wide. Claude collects findings files across lanes.
 
+**Lens count and model tier are one decision, not two.** A seven-lens audit is
+seven lanes, and seven lanes are affordable only on `codex-delegate` §5's
+basic row (`gpt-5.6-luna --effort max`), which is where routine review lenses -
+style, dead code, coverage, documentation drift - belong anyway. The lenses
+that came out of §2's threat model as consequential take the middling row
+(`gpt-5.6-sol`, `high` alone and `medium` once a second sol lane opens, three
+of them at most), and at most one lens - the seam whose defect would live in
+production unnoticed - takes `gpt-6-astra --effort high`, alone. Deciding the
+lens set without deciding the tier is how an audit exhausts the usage window
+before its report exists.
+
 Cross-executor corroboration, one run: the same audit gave a wide lane seven
 lenses and two other agents one narrow task each. The wide lane delivered 1 of
 7; the narrow agents delivered 2 of 2, and both spontaneously reported a real
