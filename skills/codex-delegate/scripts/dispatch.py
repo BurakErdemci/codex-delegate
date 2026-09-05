@@ -157,6 +157,21 @@ def _collect_paths(node: Any) -> list[str]:
     return found
 
 
+def _is_cmd_switch(token: str) -> bool:
+    """Does this token have cmd.exe's switch shape - /c, /k, /v:on?
+
+    Deliberately shape-based and narrow: one letter, then nothing or a
+    separator-free :value. /etc and /etc/passwd both fail it, so exempting
+    switches costs no containment.
+    """
+    body = token.strip(_TOKEN_WRAP)
+    if len(body) < 2 or body[0] != "/" or not body[1].isalpha():
+        return False
+    rest = body[2:]
+    return rest == "" or (rest.startswith(":")
+                          and "/" not in rest and "\\" not in rest)
+
+
 def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     """Reason to decline this argv token, or None if it is lane-safe."""
     # PowerShell -Command strings arrive with their inner quotes escaped, so a
@@ -166,7 +181,14 @@ def _token_verdict(token: str, lane_root: Path, cwd: str) -> str | None:
     # alternation were all declined "absolute path outside lane", which blocked
     # every Python probe of the run.
     token = token.replace('\\"', '"').replace("\\'", "'")
-    token = token.strip(_TOKEN_WRAP)
+    # Same class, different escape: a here-string carries its line breaks as
+    # the two characters \ and n, and whitespace-splitting leaves fragments
+    # like \n') whose lone leading backslash then reads as a rooted path.
+    # Measured 5 Sep 2026 - a changelog written through a PowerShell
+    # -Command here-string was declined "absolute path outside lane: \\n')".
+    for esc, char in (("\\n", "\n"), ("\\r", "\r"), ("\\t", "\t")):
+        token = token.replace(esc, char)
+    token = token.strip(_TOKEN_WRAP).strip()
     if not token:
         return None
     # A bare separator is an operator, not a path operand: Python's
@@ -269,7 +291,17 @@ def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, 
         # the same worker reaches any executable through an approved shell
         # anyway; this lexical scan is a write-containment proxy, not a
         # sandbox.
+        # cmd.exe carries its own switches slash-prefixed, so the scan below
+        # read /c as a POSIX-rooted path and declined it. Measured 5 Sep 2026:
+        # `cmd /c echo hi` -> "absolute path outside lane: '/c'". That is
+        # every cmd-wrapped command on Windows, the one platform this scan
+        # exists for, and the decline reason named a path nobody wrote.
+        # Scoped to a cmd program so `sh -c` and friends are untouched.
+        program = os.path.basename((tokens[0] if tokens else "").strip(_TOKEN_WRAP)).lower()
+        cmd_shell = program in ("cmd", "cmd.exe")
         for token in tokens[1:]:
+            if cmd_shell and _is_cmd_switch(token):
+                continue
             reason = _token_verdict(token, lane_root, cwd_abs)
             if reason:
                 return "decline", reason
