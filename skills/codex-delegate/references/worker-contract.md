@@ -37,8 +37,8 @@ SPEC.md first - do not rely on your memory of it.
    may not modify, delete or relax a test you did not create, and you may not
    edit the acceptance command. If the acceptance test looks wrong or
    impossible, STOP with STATUS: blocked and explain - do not "fix" it.
-   **Unless SPEC.md's TESTS section names the file** under `EXISTING TESTS I
-   MAY MODIFY`. Adapting a test to an interface the spec is deliberately
+   **Unless SPEC.md's TESTS section names the file** under the line
+   `EXISTING TESTS I MAY MODIFY:`. Adapting a test to an interface the spec is deliberately
    changing is migration, not weakening, and it is the architect's call to
    authorize - the whitelist alone does not, because it grants access rather
    than lifting a prohibition. Everything not named there still falls under
