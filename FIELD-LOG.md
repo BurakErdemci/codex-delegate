@@ -48,6 +48,27 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.10.0
+
+**The tier map had no fan-out term, so it priced the wrong dial.** v2.9.0
+documented model and effort as two dials but stopped at two tiers and said
+nothing about how many lanes of each may run at once - and lane count, not
+model name, is what ends a usage window: six `gpt-5.6-sol` lanes at `high`
+exhausts it outright. The map is now three rows keyed on lane difficulty, each
+carrying its own cap: `gpt-5.6-luna --effort max` for basic writing and review
+with no cost cap on the fan-out, `gpt-5.6-sol` for middling work at `high`
+alone and `medium` once a second sol lane opens with three lanes at most, and
+`gpt-6-astra --effort high` for the hardest single seam, one lane. The worker
+config default dropped to the cheapest row, because an unflagged lane is an
+unrecorded routing decision and the expensive default paid for it silently.
+Pairings verified against `model/list` on codex-cli 0.153.4 rather than
+assumed: astra and sol accept `low` through `ultra`, luna stops at `max`.
+(Tiering set by Burak, 5 Sep 2026.)
+→ `codex-delegate/SKILL.md` §2 and §5, `codex-audit/SKILL.md` §5,
+  `scripts/doctor.py`
+
+---
+
 ## v2.9.1
 
 **The platform where the auth files always diverge was the one place nothing
