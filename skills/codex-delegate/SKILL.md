@@ -338,7 +338,8 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
   # --mcp <name>          per granted server, registered in §3
   # --sandbox read-only   for review lanes
   # --model <id>          per lane - overrides the config default, see below
-  # --effort <level>      per lane - low|medium|high|xhigh|max, default high
+  # --effort <level>      per lane - low|medium|high|xhigh|max|ultra;
+  #                       omitted, the worker config's level stands
 ```
 
 **Two dials, and the saving comes from choosing which one to cut.** Model and

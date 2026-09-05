@@ -635,9 +635,13 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--model", default=None,
                     help="model id for this lane; overrides the config default. "
                          "Tier per lane rather than editing config between lanes.")
-    ap.add_argument("--effort", default="high",
+    ap.add_argument("--effort", default=None,
                     help="reasoning effort for this lane (low|medium|high|xhigh|"
-                         "max|ultra). Not every model offers every level, and an "
+                         "max|ultra); omitted, the worker config's level stands. "
+                         "It used to default to high and inject that "
+                         "unconditionally, which silently overrode the config "
+                         "and made the config's level unreachable. "
+                         "Not every model offers every level, and an "
                          "unsupported pairing fails the turn as turn/failed with "
                          "the reason only in RAW_OUTPUT.log - confirm the pairing "
                          "against the account's model list before relying on it.")

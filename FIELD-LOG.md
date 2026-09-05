@@ -64,6 +64,13 @@ unrecorded routing decision and the expensive default paid for it silently.
 Pairings verified against `model/list` on codex-cli 0.153.4 rather than
 assumed: astra and sol accept `low` through `ultra`, luna stops at `max`.
 (Tiering set by Burak, 5 Sep 2026.)
+
+Writing the tier into the config exposed why the config could never carry it:
+`--effort` defaulted to `high` and dispatch.py injects the flag
+unconditionally, so the config's level was unreachable and every unflagged
+lane ran at `high` no matter what the file said - the known-broken list had
+been carrying this as an open item. The flag now defaults to nothing and the
+config's level stands when no lane overrides it.
 → `codex-delegate/SKILL.md` §2 and §5, `codex-audit/SKILL.md` §5,
   `scripts/doctor.py`
 
@@ -429,8 +436,6 @@ Verified against the current tree. These are open, not forgotten.
   install and a user without access to that model fails at every dispatch.
 - **MCP registration reads one config layer.** A server defined in another
   layer is reported as unregistered.
-- **Reasoning effort is injected unconditionally**, overriding the worker
-  config and assuming the model supports that level.
 - **Orphaned children on POSIX.** The process-tree kill exists on the Windows
   branch only; on POSIX a killed dispatch can leave grandchildren running.
 - **A version string with a pre-release suffix fails to parse.**
