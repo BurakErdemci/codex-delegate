@@ -53,7 +53,7 @@ BASE_CONFIG = """\
 # Isolated Codex worker home, managed by the codex-delegate skill.
 # Deliberately minimal: no plugins, and no MCP servers beyond the ones you
 # hand over explicitly with `doctor.py --add-mcp`.
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
 

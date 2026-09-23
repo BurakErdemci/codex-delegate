@@ -48,6 +48,18 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.8.1
+
+**An old CLI rejects a new model as an account problem.** codex-cli 0.149
+answered `gpt-6-luna` with `400 "not supported when using Codex with a ChatGPT
+account"` - wording that points at the subscription, not the client. The same
+account on 0.156.1 ran Luna and Sol (`ok`, rc 0), and `doctor.py --smoke` passed
+on `gpt-6-sol`. The worker default moved to `gpt-6-sol`, and the model table the
+routing skills already cited as "the authority" - which did not exist - now does.
+→ `codex-delegate/SKILL.md` §5
+
+---
+
 ## v2.8.0
 
 **The fix was the last unaudited surface.** The flow was: red team finds,

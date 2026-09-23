@@ -340,6 +340,29 @@ Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
 it blocks idle sleep, not a closed lid, so it never replaces the liveness check.
 
+**Model selection - this table is the authority** (Burak, 23 Sep 2026; other
+skills point here instead of restating it). Pass `--model` and `--effort`;
+without `--model` the worker home's default applies (`gpt-6-sol`, written by
+`doctor.py`).
+
+| Tier | Use for | `--model` / `--effort` | Concurrent lanes |
+|---|---|---|---|
+| Luna | basic work: inventories, searches, mechanical review, narrow edits | `gpt-6-luna` / `max` | any number |
+| **Sol - the default** | nearly every Codex job: audits, research lanes, verification rounds, implementation | `gpt-6-sol` / `high`; `medium` each once 2-3 Sol lanes run | at most 3 |
+| Astra | only where truly needed: very broad, top-level architecture audit | `gpt-6-astra` / `high` | 1 |
+
+Sol's remit widened with GPT-6: work that went to Astra under the 5.6 models
+(narrow verification rounds, hard bug-fix audits) now defaults to Sol. Reach for
+Astra only when the audit's scope, not its difficulty, demands it. The lane
+caps were measured on the 5.6 models (5 Sep 2026); GPT-6 usage cost is not yet
+measured, so treat them as a starting point.
+
+The GPT-6 models need codex-cli **0.156.1+**: 0.149 rejected `gpt-6-luna` with
+`400 "not supported when using Codex with a ChatGPT account"`, 0.156.1 accepted
+both Luna and Sol (measured 23 Sep 2026). That failure surfaces as exit `1`
+below, not as the toolchain check's exit `3`, whose floor tracks the approval
+schema, not model availability.
+
 **When the harness does not wake you** - a detached `nohup`, a background
 `Start-Process`, a lane launched from another session - `--done-file` is the
 completion signal. Poll the file, not the process table:
