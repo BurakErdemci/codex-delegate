@@ -454,10 +454,10 @@ So the routing is conditional on lens count, never on enthusiasm:
 
 **Lens count and model tier are one decision, not two.** A seven-lens audit is
 seven lanes, and seven lanes are affordable only on `codex-delegate` §5's
-basic row (`gpt-5.6-luna --effort max`), which is where routine review lenses -
+basic row (`gpt-6-luna --effort max`), which is where routine review lenses -
 style, dead code, coverage, documentation drift - belong anyway. The lenses
 that came out of §2's threat model as consequential take the middling row
-(`gpt-5.6-sol`, `high` alone and `medium` once a second sol lane opens, three
+(`gpt-6-sol`, `high` alone and `medium` once a second sol lane opens, three
 of them at most), and at most one lens - the seam whose defect would live in
 production unnoticed - takes `gpt-6-astra --effort high`, alone. Deciding the
 lens set without deciding the tier is how an audit exhausts the usage window

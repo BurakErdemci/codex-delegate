@@ -388,12 +388,16 @@ tier you picked - the cap is half the rule, not a footnote to it.
 
 | Lane difficulty | Model | Effort | Parallel lanes |
 |---|---|---|---|
-| **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-5.6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
-| **Middling** - work that pushes back, ordinary review of real logic | `gpt-5.6-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
+| **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
+| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
 | **Hardest** - core seams, the largest surfaces, anything whose defect would live in production unnoticed | `gpt-6-astra` | `high` | **1**, unless the user says otherwise |
 
 (Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
-cheap-at-max plus expensive-at-medium, which had no fan-out term at all.)
+cheap-at-max plus expensive-at-medium, which had no fan-out term at all. Ids
+moved to GPT-6 on 23 Sep 2026, and with them the default: Sol takes nearly
+every Codex job, bug-fix and correctness audits included; Astra is kept for
+the rare audit whose scope is very broad, top-level architecture; Luna stays
+on basic work - `delegation-routing` carries the reasoning.)
 
 **Parallelism is the dial that ends the usage window, not the model name.**
 Six lanes on `sol` at `high` exhausts the limit outright - which is why the sol
@@ -425,7 +429,11 @@ rather than assuming the levels carry across models. Measured 5 Sep 2026 on
 codex-cli 0.153.4: `gpt-6-astra` and `gpt-5.6-sol` accept `low` through
 `ultra`; `gpt-5.6-luna` stops at `max` and has no `ultra`. Every pairing in the
 table above was checked against that list - re-check it after a CLI upgrade
-rather than inheriting this line.
+rather than inheriting this line. Re-measured 24 Sep 2026 on codex-cli 0.156.1
+after the GPT-6 move: the list offers `gpt-6-astra` (default), `gpt-6-sol`, `gpt-6-luna` and
+the 5.6 models; `gpt-6-astra` and `gpt-6-sol` accept `low` through `ultra`,
+`gpt-6-luna` stops at `max` like its predecessor. The table had kept the 5.6
+ids for three weeks because nothing re-ran this check.
 
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:

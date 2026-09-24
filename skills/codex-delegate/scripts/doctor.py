@@ -58,7 +58,7 @@ BASE_CONFIG = """\
 # --model/--effort should land on the cheapest tier, because an unflagged lane
 # is an unrecorded routing decision and the expensive default pays for it
 # silently. Tier up per lane with the flags (skills/codex-delegate SKILL.md 5).
-model = "gpt-5.6-luna"
+model = "gpt-6-luna"
 model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 
