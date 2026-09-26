@@ -390,14 +390,17 @@ tier you picked - the cap is half the rule, not a footnote to it.
 |---|---|---|---|
 | **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
 | **Middling** - work that pushes back, ordinary review of real logic | `gpt-6-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
-| **Hardest** - core seams, the largest surfaces, anything whose defect would live in production unnoticed | `gpt-6-astra` | `high` | **1**, unless the user says otherwise |
+| **Hardest** - a NARROW job at the top of the difficulty scale whose defect would be the most critical: core seams, silent data loss, an authorization boundary | `gpt-6-astra` | `medium` | **1**, unless the user says otherwise |
 
 (Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
 cheap-at-max plus expensive-at-medium, which had no fan-out term at all. Ids
 moved to GPT-6 on 23 Sep 2026, and with them the default: Sol takes nearly
-every Codex job, bug-fix and correctness audits included; Astra is kept for
-the rare audit whose scope is very broad, top-level architecture; Luna stays
-on basic work - `delegation-routing` carries the reasoning.)
+every Codex job, bug-fix and correctness audits included; Luna stays on basic
+work - `delegation-routing` carries the reasoning. Astra corrected by Burak,
+26 Sep 2026: "the rate limit would not hold" for a broad-scope Astra lane, so
+Astra is NOT the broad-audit tier - it is one lane at `medium` for a narrow
+audit that needs the deepest reasoning on the most critical question. A broad
+scope splits into sol/luna lenses instead.)
 
 **Parallelism is the dial that ends the usage window, not the model name.**
 Six lanes on `sol` at `high` exhausts the limit outright - which is why the sol

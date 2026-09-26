@@ -459,7 +459,7 @@ style, dead code, coverage, documentation drift - belong anyway. The lenses
 that came out of §2's threat model as consequential take the middling row
 (`gpt-6-sol`, `high` alone and `medium` once a second sol lane opens, three
 of them at most), and at most one lens - the seam whose defect would live in
-production unnoticed - takes `gpt-6-astra --effort high`, alone. Deciding the
+production unnoticed, scoped narrowly - takes `gpt-6-astra --effort medium`, alone. Deciding the
 lens set without deciding the tier is how an audit exhausts the usage window
 before its report exists.
 
