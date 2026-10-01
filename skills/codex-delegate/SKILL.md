@@ -389,7 +389,7 @@ tier you picked - the cap is half the rule, not a footnote to it.
 | Lane difficulty | Model | Effort | Parallel lanes |
 |---|---|---|---|
 | **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
-| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
+| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6.1-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
 | **Hardest** - a NARROW job at the top of the difficulty scale whose defect would be the most critical: core seams, silent data loss, an authorization boundary | `gpt-6-astra` | `medium` | **1**, unless the user says otherwise |
 
 (Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
@@ -437,6 +437,11 @@ after the GPT-6 move: the list offers `gpt-6-astra` (default), `gpt-6-sol`, `gpt
 the 5.6 models; `gpt-6-astra` and `gpt-6-sol` accept `low` through `ultra`,
 `gpt-6-luna` stops at `max` like its predecessor. The table had kept the 5.6
 ids for three weeks because nothing re-ran this check.
+Re-measured 1 Oct 2026 on codex-cli 0.159.3: the list adds `gpt-6.1-sol`
+(priority 1, "latest workhorse"), `low` through `ultra`; codex-cli 0.157.0
+refused it ("not supported when using Codex with a ChatGPT account"), so a
+new model id can need a CLI upgrade first. Burak moved the middling row to
+`gpt-6.1-sol` the same day.
 
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
