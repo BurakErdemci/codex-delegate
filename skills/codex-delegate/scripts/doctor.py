@@ -30,6 +30,7 @@ if sys.version_info < (3, 11):  # tomllib arrived in 3.11; stock macOS python3 i
     )
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -53,8 +54,12 @@ BASE_CONFIG = """\
 # Isolated Codex worker home, managed by the codex-delegate skill.
 # Deliberately minimal: no plugins, and no MCP servers beyond the ones you
 # hand over explicitly with `doctor.py --add-mcp`.
-model = "gpt-6-sol"
-model_reasoning_effort = "high"
+# The floor of the tier map, not a recommendation: a lane dispatched without
+# --model/--effort should land on the cheapest tier, because an unflagged lane
+# is an unrecorded routing decision and the expensive default pays for it
+# silently. Tier up per lane with the flags (skills/codex-delegate SKILL.md 5).
+model = "gpt-6-luna"
+model_reasoning_effort = "max"
 sandbox_mode = "workspace-write"
 
 [sandbox_workspace_write]
@@ -86,6 +91,20 @@ def auth_identity(home: Path) -> tuple[str | None, str | None, str | None]:
     if data.get("OPENAI_API_KEY"):
         return None, data.get("last_refresh"), "apikey"
     return None, None, None
+
+
+def auth_age_days(stamp: str | None) -> float | None:
+    """Age of a last_refresh stamp in days, or None if it cannot be read."""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        when = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return (now - when).total_seconds() / 86400.0
 
 
 def sync_auth(worker: Path, main: Path) -> tuple[bool, str]:
@@ -356,7 +375,34 @@ def cmd_check(home: Path) -> int:
                  f"({work_id} vs {main_id}); run --init to relink")
         problems += 1
     else:
-        say(OK, f"login matches main home (refreshed {work_at})")
+        # --init links the two auth files so they cannot diverge, but the link
+        # is a symlink and Windows refuses it without privileges, so --init
+        # falls back to a copy and says so once. --check never repeated it,
+        # which left the platform where divergence is permanent as the one
+        # place nothing kept mentioning the risk.
+        link = home / "auth.json"
+        if not link.is_symlink():
+            say(WARN, f"{link} is a copy, not a link to {MAIN_HOME / 'auth.json'} - "
+                      "the two can diverge, and `codex login` only writes the main "
+                      "home. Re-run --init after every login on this machine.")
+        age = auth_age_days(work_at)
+        # The worker home is a separate identity from the main one and goes
+        # stale on its own schedule. Measured: a worker profile untouched for a
+        # month belonged to a different account than the operator expected, and
+        # four lanes dispatched in parallel died in the first second with
+        # "refresh token was revoked" - while `codex exec` from the main home
+        # answered fine, which is what made it look like anything but auth.
+        # The id comparison above catches the mismatch; the age catches the
+        # profile that is merely rotting.
+        if age is not None and age > 30:
+            say(WARN, f"login matches main home but was last refreshed "
+                      f"{age:.0f} days ago ({work_at}) - dispatch can still fail "
+                      f"with a revoked refresh token. Re-login before a fan-out: "
+                      f"CODEX_HOME={home} codex login")
+        elif age is not None:
+            say(OK, f"login matches main home (refreshed {age:.0f} days ago)")
+        else:
+            say(OK, f"login matches main home (refreshed {work_at})")
     return 1 if problems else 0
 
 

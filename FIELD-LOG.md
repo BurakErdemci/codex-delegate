@@ -48,15 +48,214 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
-## v2.8.1
+## v2.12.0
 
-**An old CLI rejects a new model as an account problem.** codex-cli 0.149
-answered `gpt-6-luna` with `400 "not supported when using Codex with a ChatGPT
-account"` - wording that points at the subscription, not the client. The same
-account on 0.156.1 ran Luna and Sol (`ok`, rc 0), and `doctor.py --smoke` passed
-on `gpt-6-sol`. The worker default moved to `gpt-6-sol`, and the model table the
-routing skills already cited as "the authority" - which did not exist - now does.
+**A spec that contradicts the worker contract produces no result, not a worse
+one.** REQUIREMENTS told the worker to update two existing tests. FILE
+WHITELIST listed them. The TESTS field carried the template's "name any
+pre-existing test file it must leave alone". worker-contract prohibition 4
+forbade modifying a test the worker did not create. Nothing anywhere said
+which source outranked the other, so the worker did the correct thing and
+stopped: `STATUS: blocked`, 7 commands, 0 production files, 311k tokens. Being
+right is not the same as being unblocked.
+
+The whitelist is the specific trap. Granting access reads like granting
+permission, and it is not - the whitelist says where the worker may write, the
+prohibition says what it may not do, and the two are different axes. So
+prohibition 4 now carries the escape clause prohibition 5 already had, the
+template ships `EXISTING TESTS I MAY MODIFY:` as a mandatory slot rather than
+prose about it, and the contract states plainly which rules a spec can lift
+(4 and 5, in their own words) and which it can never lift (1, 2, 3, 6 - a spec
+that instructs otherwise is itself the defect).
+
+**dispatch.py refuses a spec whose whitelist names an existing test file TESTS
+does not authorize** (rc=2). Narrow on purpose: only files already in the tree,
+since one the worker creates was never under the prohibition. The filename
+shape is generous everywhere except one branch - `FooTest.java` is matched
+case-sensitively, because under the outer IGNORECASE it also matched
+`latest.py` and `contest.py`, which would have had the architect authorizing
+ordinary source files.
+
+**The cost is the argument for preflight gates, not for a better worker.** Two
+consecutive turns on the most expensive tier, 677k tokens, zero lines of code -
+and both causes were defects in the spec, sitting in a file on disk, findable
+without a worker. A gate that runs before dispatch costs nothing and cannot
+burn a rate limit.
+
+→ codex-delegate/SKILL.md 4, references/worker-contract.md,
+references/spec-template.md, scripts/dispatch.py, scripts/test_approvals.py
+
+---
+
+## v2.11.0
+
+**The approval filter declined three things nobody wrote, and each decline
+read as the worker misbehaving.** The scan that keeps a worker's writes inside
+its lane is lexical - it splits the command line and judges every token - so
+three shapes that are not paths were judged as paths. `cmd`'s own switches are
+slash-prefixed, and `cmd /c echo hi` was declined `absolute path outside lane:
+'/c'`: every cmd-wrapped command on Windows, the one platform the scan exists
+for. A PowerShell here-string carries its line breaks as the two characters
+`\` and `n`, and whitespace-splitting left fragments whose lone leading
+backslash read as a UNC path. Both are fixed narrowly - the switch
+exemption tests a shape (one letter, optional separator-free `:value`) and
+applies only when the program is `cmd`, so `/etc/passwd` and `sh -c` behave
+exactly as before.
+
+**The third one cost two whole turns, and it is not a filter bug.** A spec's
+ACCEPTANCE command named the main tree's venv by absolute path, because a
+worktree never has a venv. The sandbox declined it, so the worker could not run
+its own checks; the turn ended with 0 files written and the reason visible only
+in RAW_OUTPUT.log. dispatch.py now scans SPEC.md's ACCEPTANCE block through the
+same filter before spawning and refuses with rc=2, naming the token and the
+remedy. The remedy is `new-lane.py open --tool NAME=PATH`, which writes a
+lane-local `NAME.cmd`/`NAME.sh` around the outside executable: the absolute
+path then lives inside a script the filter never reads, rather than on the
+command line it scans. That is usability, not a hole - the sandbox contains
+writes, this scan is only a proxy, and a worker could already reach any
+executable through an approved shell.
+
+**The gate and the filter share one function, because the first draft did
+not.** Duplicating the loop made the gate block `cmd /c ...` that the live
+filter approves, within minutes of being written. A gate that disagrees with
+the thing it guards is worse than no gate: it stops work while enforcing a rule
+that does not exist. `scan_tokens` is now the single loop, and
+`scripts/test_approvals.py` pins both halves of the boundary - the false
+positives that must approve, and the escapes that must still decline. 22 cases,
+no processes, no I/O; `approval_decision` was written pure so that file could
+exist, and until now it did not.
+
+**A field note got the mechanism wrong in three places, and the fix would have
+been written against it.** The note claimed the filter rejects every
+out-of-lane absolute path (it exempts argv[0] as the program, by design), that
+it scans the content of file writes (file approvals read the path only - a
+changelog quoting an outside path is approved), and that the changelog failure
+came from that content scan (it came from the changelog being written through a
+shell one-liner, where its text is command line). Measured by calling
+`approval_decision` directly on each shape. Recorded here because acting on the
+note's proposed fix would have changed code that does not do what it was
+accused of.
+
+→ codex-delegate/SKILL.md 4 and 5, references/spec-template.md,
+scripts/dispatch.py, scripts/new-lane.py, scripts/test_approvals.py
+
+---
+
+## v2.10.0
+
+**The tier map had no fan-out term, so it priced the wrong dial.** v2.9.0
+documented model and effort as two dials but stopped at two tiers and said
+nothing about how many lanes of each may run at once - and lane count, not
+model name, is what ends a usage window: six `gpt-5.6-sol` lanes at `high`
+exhausts it outright. The map is now three rows keyed on lane difficulty, each
+carrying its own cap: `gpt-5.6-luna --effort max` for basic writing and review
+with no cost cap on the fan-out, `gpt-5.6-sol` for middling work at `high`
+alone and `medium` once a second sol lane opens with three lanes at most, and
+`gpt-6-astra --effort high` for the hardest single seam, one lane. The worker
+config default dropped to the cheapest row, because an unflagged lane is an
+unrecorded routing decision and the expensive default paid for it silently.
+Pairings verified against `model/list` on codex-cli 0.153.4 rather than
+assumed: astra and sol accept `low` through `ultra`, luna stops at `max`.
+(Tiering set by Burak, 5 Sep 2026.)
+
+Writing the tier into the config exposed why the config could never carry it:
+`--effort` defaulted to `high` and dispatch.py injects the flag
+unconditionally, so the config's level was unreachable and every unflagged
+lane ran at `high` no matter what the file said - the known-broken list had
+been carrying this as an open item. The flag now defaults to nothing and the
+config's level stands when no lane overrides it.
+→ `codex-delegate/SKILL.md` §2 and §5, `codex-audit/SKILL.md` §5,
+  `scripts/doctor.py`, `scripts/dispatch.py`
+
+---
+
+## v2.9.1
+
+**The platform where the auth files always diverge was the one place nothing
+said so.** `--init` symlinks the worker's `auth.json` to the main home so the
+two cannot drift, but Windows refuses the symlink without privileges, so
+`--init` falls back to a copy and warns - once, at install time. `--check`
+then reported "login matches main home" forever after, comparing account ids
+at that instant and saying nothing about the copy underneath. Found by
+inspection on a Windows install: two `auth.json` files, different inodes,
+different contents, different `last_refresh` stamps. `--check` now reports
+whether the worker's login is a link or a copy.
+→ `scripts/doctor.py`
+
+---
+
+## v2.9.0
+
+**The archive was copied and never checked, and the next line was
+irreversible.** `close` copied a lane's run directory into the main repo and
+then force-removed the worktree. A copy that silently did not happen looks
+exactly like one that did: nine lanes were removed this way in one round and
+every proof script and finding text in them is unrecoverable. Presence is not
+the test either - a truncated destination passes it - so `close` now compares
+every copy against its source by sha256, writes `MANIFEST.sha256`, and removes
+nothing unless everything matched. The mechanism already existed a few hundred
+lines up, where `open` verifies its own rollback; only the destructive path
+lacked it.
+→ `codex-delegate/SKILL.md` §9, `scripts/new-lane.py`
+
+**The approval filter's rules lived only in the code, so briefs kept walking
+into them.** Every argv token naming a location outside the lane is declined,
+and three false positives cost repeated rounds: fixtures built with
+`mkdtemp()` land in the system temp directory, a container path passed as its
+own argument is indistinguishable from a host absolute path, and a leading
+backslash makes a regex fragment look like a UNC path. Written into the brief
+instead, a lane that had been starving ran 23 approvals and 0 declines.
 → `codex-delegate/SKILL.md` §5
+
+**`rc=5` was being read as a failed round.** It means the turn completed with
+some commands denied. Across four audit rounds every such round still carried
+sound findings, so the order is: read `findings/`, then the decline lines, then
+decide. Re-dispatching on the exit code alone pays twice for a round that
+already delivered.
+→ `codex-audit/SKILL.md` §3
+
+**The refusal antidote was bound to every brief except the riskiest one.**
+v2.8.0 added "ask for a measurement, not for an attack" and attached it to the
+hunter lenses, leaving it off the verification brief - the one text whose
+stated goal is to defeat a security fix. The breaking framing kept dying on the
+provider's classifier; the measuring framing carried the round every time.
+→ `codex-audit/references/lenses.md`
+
+**Two dials were being used as one.** Model and reasoning effort are both
+per-lane, and neither was documented, so every lane inherited the config
+default. Tiering the two independently - the cheaper model at max effort by
+default, the expensive one at medium only where a missed defect would live in
+production unnoticed - held five lanes at 56% of a five-hour window where
+running them all expensive would have exhausted it. The same run killed a
+tempting inference: the cheap lanes produced three to four times the transcript
+and still cost less, so transcript volume is not a proxy for spend. An
+unsupported model/effort pairing fails the turn as `turn/failed` with the
+reason only in `RAW_OUTPUT.log`.
+→ `codex-delegate/SKILL.md` §5, `scripts/dispatch.py`
+
+**The worker login is a separate identity and rots on its own schedule.** Four
+lanes died in the first second with a revoked refresh token while `codex exec`
+from the main home answered normally - a different home, a different token,
+and a profile untouched for a month belonging to a different account than
+expected. `--check` compared account ids but never the age; it now warns past
+30 days.
+→ `scripts/doctor.py`, `codex-delegate/references/setup.md`
+
+**A lane's environment can often be linked instead of installed.** The
+toolchain section jumped from "a worktree carries no environment" to "install
+it or accept static reasoning". Symlinking the main tree's `.venv` into a lane
+turned a lens that could only write `unverified` claims into one that ran a
+real probe and returned `verified-empirically`. The other end of the range was
+measured in the same round: a compiled toolchain could be neither linked nor
+installed and returned 20 of 20 findings unverified.
+→ `codex-audit/SKILL.md` §3
+
+**The setup page taught an idiom SKILL.md had already replaced.** The
+`SKILL_DIR` lookup was corrected in SKILL.md - `-maxdepth 10` because the
+installed path is 8 levels deep, `sort -V | tail -1` because `-print -quit`
+picked 2.4.0 out of a cache that also held 2.5.0 - while the page a new
+install actually follows kept handing over the broken form.
+→ `codex-delegate/references/setup.md`
 
 ---
 
@@ -325,13 +524,17 @@ Verified against the current tree. These are open, not forgotten.
   of a declined command - the evidence of an isolation attempt.
 - **The transcript never rotates.** It opens in append mode with no size cap,
   so repeated dispatches into one task directory grow it without bound.
-- **The worker model is hardcoded**, with no flag and no schema stamp on the
-  worker config, so a model change in a new release never reaches an existing
-  install and a user without access to that model fails at every dispatch.
+- **The worker config carries no schema stamp**, so a default change in a new
+  release never reaches an existing install, and a user without access to the
+  configured model fails at every dispatch until they notice. (`--model` and
+  `--effort` per lane landed in v2.10.0; the stale-default half is still open.)
+- **The approval scan is lexical, and that is a ceiling, not a bug to fix.**
+  It splits a command line and judges tokens, so it cannot tell a path operand
+  from a path-shaped string, and every false positive it has produced came from
+  that. It is a write-containment proxy for the OS sandbox Windows does not
+  run - not a security boundary, and it should never be read as one.
 - **MCP registration reads one config layer.** A server defined in another
   layer is reported as unregistered.
-- **Reasoning effort is injected unconditionally**, overriding the worker
-  config and assuming the model supports that level.
 - **Orphaned children on POSIX.** The process-tree kill exists on the Windows
   branch only; on POSIX a killed dispatch can leave grandchildren running.
 - **A version string with a pre-release suffix fails to parse.**

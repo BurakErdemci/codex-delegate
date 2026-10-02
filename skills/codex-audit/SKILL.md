@@ -284,6 +284,17 @@ the worker was starved of permissions), `1` failed or refused, `2/3/4`
 preflight. Read the verdict before FINAL.txt, and remember §3's other rule: a
 lane reporting zero findings is not a clean lens until you have read the tail
 of its `RAW_OUTPUT.log`.
+**On `rc=5`, read the findings directory before you judge the round.** An audit
+lane writes findings to disk as it goes, so a starved turn is not an empty one:
+measured across four audit rounds, every `rc=5` round still carried sound
+findings, and the declines had cost individual commands rather than the lens.
+The order that holds: read `findings/`, then grep `^\[decline\]` in
+`RAW_OUTPUT.log` to see which commands were denied and whether any finding
+depended on one, then decide whether the lens needs a re-run. Re-dispatching on
+the exit code alone pays for a round that already delivered - and the fix is
+usually three lines in the brief, not another turn (see codex-delegate SKILL.md
+§5, "Write commands the approval filter can approve").
+
 
 Closing is `new-lane.py close --lane "$LANE" --task-id "$TASK_ID"`: it archives
 the findings, probes and contract into the main repo, removes the worktree and
@@ -400,6 +411,24 @@ toolchain, either install it into the lane before dispatch (`codex-delegate`
 §4) or say in the brief that this lens ships static reasoning, and label its
 findings accordingly.
 
+**Before installing anything, try linking what the main tree already has.**
+For an interpreted project the environment is usually a directory, and a
+symlink from the lane to the main tree's is cheaper than an install and needs
+no network. Measured: symlinking the main tree's `.venv` into a lane made
+`import` work where a bare interpreter could not find the package at all, and
+the lens went from writing `unverified` claims to running a real behavioural
+probe and returning `verified-empirically`. The same round measured the other
+end of the range: a compiled toolchain could not be linked or installed, and
+**20 of 20 findings from that lens came back `unverified`** - which is the
+signal to write the closing test in the main tree instead of buying it at lane
+price.
+
+The third case is the cheap one and worth checking first: a project with **no
+dependencies at all** needs neither the install nor the link. A zero-dependency
+repo ran its full suite inside a lane with no `node_modules` directory present
+- so ask what the toolchain actually requires before assuming a lane cannot
+have it.
+
 ### Width is what breaks - route by lens count
 
 Codex has real subagents (`spawn_agent`, `wait_agent`, `list_agents` - runtime
@@ -422,6 +451,17 @@ So the routing is conditional on lens count, never on enthusiasm:
   brief, each writing findings into its own task dir. Lanes are already
   parallel and already isolated; a wide subagent tree buys nothing but a
   coordinator that fails wide. Claude collects findings files across lanes.
+
+**Lens count and model tier are one decision, not two.** A seven-lens audit is
+seven lanes, and seven lanes are affordable only on `codex-delegate` §5's
+basic row (`gpt-6-luna --effort max`), which is where routine review lenses -
+style, dead code, coverage, documentation drift - belong anyway. The lenses
+that came out of §2's threat model as consequential take the middling row
+(`gpt-6.1-sol`, `high` alone and `medium` once a second sol lane opens, three
+of them at most), and at most one lens - the seam whose defect would live in
+production unnoticed, scoped narrowly - takes `gpt-6-astra --effort medium`, alone. Deciding the
+lens set without deciding the tier is how an audit exhausts the usage window
+before its report exists.
 
 Cross-executor corroboration, one run: the same audit gave a wide lane seven
 lenses and two other agents one narrow task each. The wide lane delivered 1 of
@@ -746,8 +786,11 @@ closure is not the end; it is the entry to the final loop:
 1. **Dispatch one narrow verification lane over the fix diff.** Scope is the
    diff the fixes produced plus the closure claims - not the whole codebase,
    which is what keeps the round cheap. Brief per `references/lenses.md`'s
-   verification-brief section: these classes were closed by this diff; break
-   the fixes, and hunt what the diff introduced. The finding contract applies
+   verification-brief section: these classes were closed by this diff; measure
+   each closure claim against the set of inputs the class covers, and hunt what
+   the diff introduced. Write it as a measurement, not as an attack - this
+   brief carries the highest refusal risk in the plugin, and the framing is
+   what the classifier reads. The finding contract applies
    verbatim - a verification finding without a probe is a hypothesis here too.
 2. **Triage every returned finding with a written verdict.** A red team asked
    to look always finds something, so "it found things" is not the loop

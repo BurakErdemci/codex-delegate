@@ -7,9 +7,9 @@ so resolve the script path first - pasting that variable into a terminal gives
 you an empty path and a misleading "No such file or directory":
 
 ```bash
-SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 7 -type f \
-  -path '*/codex-delegate/scripts/doctor.py' -print -quit 2>/dev/null \
-  | sed 's|/scripts/doctor.py||')
+SKILL_DIR=$(find "$HOME/.claude/plugins" -maxdepth 10 -type f \
+  -path '*/codex-delegate/scripts/doctor.py' 2>/dev/null \
+  | sort -V | tail -1 | sed 's|/scripts/doctor.py||')
 echo "${SKILL_DIR:?codex-delegate scripts not found - is the plugin installed?}"
 
 python3 "$SKILL_DIR/scripts/doctor.py" --init
@@ -18,6 +18,12 @@ python3 "$SKILL_DIR/scripts/doctor.py" --smoke
 
 No wildcards on purpose: zsh, the macOS default shell, aborts the entire
 command when a glob matches nothing. `find` has no such behaviour.
+
+`-maxdepth 10` and `sort -V | tail -1` are both measured corrections, and both
+fail silently when wrong: the installed path is 8 levels deep, so the earlier
+`-maxdepth 7` returned nothing, and `-print -quit` picked 2.4.0 out of a cache
+that also held 2.5.0. SKILL.md 0.1 carries the full reasoning - this file used
+to teach the broken form long after SKILL.md was fixed.
 
 `--init` creates `~/.codex-worker` with a minimal config and links its login to
 your main Codex home. `--smoke` runs one tiny real turn, which is the only way
@@ -95,8 +101,19 @@ logged out or signed in to another account". The CLI works fine the whole time,
 which makes this look like anything but an auth problem.
 
 `--init` links the two files so they cannot diverge, and `--check` compares the
-account ids. API-key auth is untested; `--check` skips the comparison for it
-and says so.
+account ids and reports how old the worker's login is - warning past 30 days,
+because the worker home is a separate identity that goes stale on its own
+schedule. API-key auth is untested; `--check` skips the comparison for it and
+says so.
+
+**The CLI working proves nothing about the lanes.** Measured: four lanes
+dispatched in parallel died in the first second with `status='failed'`,
+`codexErrorInfo='unauthorized'` and "refresh token was revoked", while `codex
+exec` from the main home answered normally - because that is a different home
+with a different token. A worker profile untouched for a month turned out to
+belong to a different account than the operator expected. Run `--check` before
+a fan-out rather than after it: it costs one command, and the alternative is
+burning an entire round of lanes to find out.
 
 ## Why the run directory is `.delegate-runs/`
 

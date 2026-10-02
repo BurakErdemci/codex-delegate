@@ -148,6 +148,9 @@ Consequences, all deliberate:
 - **Practical ceiling ~20 concurrent workers** (RAM + provider rate limits;
   measured: a 23-lane run had 2 workers wedge on dead connections at startup).
   Default to <=4 lanes; go wider only when the task genuinely decomposes wide.
+  **The tier caps in §5 bind tighter than this number and are about spend,
+  not stability:** at most 3 `sol` lanes, exactly 1 `astra` lane. Only `luna`
+  lanes are free to reach this ceiling.
 - **Stagger spawns 2-5 s apart.** Same incident: the two wedged workers sat
   silent for 30 minutes. The stagger costs a minute; a zombie costs half an
   hour.
@@ -214,7 +217,9 @@ TASK_ID=$(date +%F)-<shortname>                    # e.g. 2026-07-26-inventory-u
 LANE="$(dirname "$PWD")/$(basename "$PWD")-lanes/$TASK_ID"   # the path open uses
 "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" --base "$BASE_SHA"
 # --mode audit|research for the sibling flows · --lane <path> for a short root
-# (see the MAX_PATH note below) · run it from the MAIN tree, never from a lane
+# (see the MAX_PATH note below) · --tool NAME=PATH to bridge an out-of-lane
+# interpreter (see the dependencies bullet) · run it from the MAIN tree, never
+# from a lane
 ```
 
 Set `LANE` yourself as above and check it against the `lane:` line the command
@@ -264,6 +269,24 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
   this failure, patched by hand.) `--trust` writes the entry.
 - **Install dependencies inside the lane** if acceptance needs them
   (`node_modules/` and friends do not come with a worktree).
+- **Bridge the interpreter the acceptance command needs, never name its path.**
+  A worktree gets no venv, so the interpreter is outside the lane by
+  construction - and the sandbox scans the command line and declines any token
+  that leaves the lane. A spec whose ACCEPTANCE calls the main tree's venv
+  therefore does not fail, it never runs: measured 5 Sep 2026, two turns, 0
+  files written, the reason visible only in RAW_OUTPUT.log.
+
+  ```bash
+  "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" \
+    --tool py="$PWD/Backend/venv/Scripts/python.exe"
+  # writes .delegate-runs/$TASK_ID/py.cmd and py.sh; ACCEPTANCE calls those
+  ```
+
+  The absolute path then lives inside a script, which the filter never reads,
+  instead of on the command line, which it scans. `.delegate-runs/` is already
+  excluded from the §6 footprint, so the bridges are not a scope violation.
+  `dispatch.py` scans ACCEPTANCE against the same filter and refuses the turn
+  (rc=2) rather than burning it, but the gate only tells you; this is the fix.
 - **Everything for a lane lives inside it**: `$LANE/.delegate-runs/$TASK_ID/`
   holds SPEC.md, PROMPT.txt, RAW_OUTPUT.log, FINAL.txt, ROUNDS.txt and the
   worker's `turn-N.md`. One location; removing the worktree removes all
@@ -271,6 +294,24 @@ mkdir -p "$LANE/.delegate-runs/$TASK_ID"
 
 Write `SPEC.md` from `references/spec-template.md` - every field, truthfully.
 If a field cannot be filled, the task is not delegation-ready (§0).
+
+**A spec that contradicts the worker contract does not produce a worse result -
+it produces no result.** The worker holds both documents, has no rule saying
+which outranks the other, and correctly takes the safe side: it stops. The
+whitelist is the usual trap, because granting access reads like granting
+permission and is not. Measured 5 Sep 2026: REQUIREMENTS said to update two
+existing tests, the whitelist listed them, prohibition 4 forbade touching a
+test the worker did not create, and the turn ended blocked after 7 commands
+and 311k tokens with 0 production files. Only prohibitions 4 and 5 can be
+lifted, and only by the spec's own words - `EXISTING TESTS I MAY MODIFY:` in
+TESTS, and the dependency clause in rule 5. `dispatch.py` refuses (rc=2) when
+the whitelist carries an existing test file TESTS does not name, but the gate
+only catches this one shape; read the spec against the contract yourself.
+
+Both preflight gates cost nothing and run before a worker exists. That matters
+most on the expensive tiers: two consecutive `gpt-6-astra` turns, 677k tokens
+total, produced zero lines of code, and both causes were defects in the spec
+rather than in the work.
 
 Build `PROMPT.txt`: the full contents of `references/worker-contract.md`,
 followed by one line:
@@ -334,34 +375,77 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
   --timeout 3600
   # --mcp <name>          per granted server, registered in §3
   # --sandbox read-only   for review lanes
+  # --model <id>          per lane - overrides the config default, see below
+  # --effort <level>      per lane - low|medium|high|xhigh|max|ultra;
+  #                       omitted, the worker config's level stands
 ```
+
+**Two dials, and the saving comes from choosing which one to cut.** Model and
+reasoning effort are set per lane and the flags override whatever
+`~/.codex-worker/config.toml` holds, so tiering never means editing config
+between lanes. Route on **how hard the lane is**, then cap the fan-out by the
+tier you picked - the cap is half the rule, not a footnote to it.
+
+| Lane difficulty | Model | Effort | Parallel lanes |
+|---|---|---|---|
+| **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
+| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6.1-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
+| **Hardest** - a NARROW job at the top of the difficulty scale whose defect would be the most critical: core seams, silent data loss, an authorization boundary | `gpt-6-astra` | `medium` | **1**, unless the user says otherwise |
+
+(Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
+cheap-at-max plus expensive-at-medium, which had no fan-out term at all. Ids
+moved to GPT-6 on 23 Sep 2026, and with them the default: Sol takes nearly
+every Codex job, bug-fix and correctness audits included; Luna stays on basic
+work - `delegation-routing` carries the reasoning. Astra corrected by Burak,
+26 Sep 2026: "the rate limit would not hold" for a broad-scope Astra lane, so
+Astra is NOT the broad-audit tier - it is one lane at `medium` for a narrow
+audit that needs the deepest reasoning on the most critical question. A broad
+scope splits into sol/luna lenses instead.)
+
+**Parallelism is the dial that ends the usage window, not the model name.**
+Six lanes on `sol` at `high` exhausts the limit outright - which is why the sol
+row caps at three lanes and drops to `medium` the moment a second sol lane
+opens, and why astra runs alone. Luna at `max` is the one tier you can fan out
+freely on cost grounds; §2's default of <=4 lanes still applies to it, for
+wedge risk rather than for spend.
+
+"Hardest" is decided by the cost of being wrong, not by the size of the work:
+silent data loss, an authorization or privacy boundary, a termination contract.
+Style, dead code, test coverage and documentation consistency go to the luna
+row no matter how many files they touch.
+
+Measured under the earlier two-tier rule, and the shape still holds: a
+five-lane audit with two lanes on the expensive model at medium and three on
+the cheap model at max sat at **56% of a five-hour usage window**, where
+running every lane on the expensive model would have exhausted it before the
+audit finished. In the same run the cheap lanes produced three to four times
+the transcript of the expensive ones and still cost less - **transcript volume
+is not a proxy for spend**, and reasoning from one to the other gets the tier
+backwards.
+
+**Confirm the pairing before you rely on it, because a bad one fails
+silently.** Not every model offers every effort level, and dispatch.py drops a
+turn whose effort the model does not support as `turn/failed` - the reason
+stays in `RAW_OUTPUT.log` and nothing else says a word. List what the account
+actually has (`app-server`'s `model/list`, under the worker's `CODEX_HOME`)
+rather than assuming the levels carry across models. Measured 5 Sep 2026 on
+codex-cli 0.153.4: `gpt-6-astra` and `gpt-5.6-sol` accept `low` through
+`ultra`; `gpt-5.6-luna` stops at `max` and has no `ultra`. Every pairing in the
+table above was checked against that list - re-check it after a CLI upgrade
+rather than inheriting this line. Re-measured 24 Sep 2026 on codex-cli 0.156.1
+after the GPT-6 move: the list offers `gpt-6-astra` (default), `gpt-6-sol`, `gpt-6-luna` and
+the 5.6 models; `gpt-6-astra` and `gpt-6-sol` accept `low` through `ultra`,
+`gpt-6-luna` stops at `max` like its predecessor. The table had kept the 5.6
+ids for three weeks because nothing re-ran this check.
+Re-measured 1 Oct 2026 on codex-cli 0.159.3: the list adds `gpt-6.1-sol`
+(priority 1, "latest workhorse"), `low` through `ultra`; codex-cli 0.157.0
+refused it ("not supported when using Codex with a ChatGPT account"), so a
+new model id can need a CLI upgrade first. Burak moved the middling row to
+`gpt-6.1-sol` the same day.
 
 Run it in the background; the harness wakes you when it exits. Start the next
 lane 2-5 s later (§2). On macOS prefix with `caffeinate -i` - best-effort only:
 it blocks idle sleep, not a closed lid, so it never replaces the liveness check.
-
-**Model selection - this table is the authority** (Burak, 23 Sep 2026; other
-skills point here instead of restating it). Pass `--model` and `--effort`;
-without `--model` the worker home's default applies (`gpt-6-sol`, written by
-`doctor.py`).
-
-| Tier | Use for | `--model` / `--effort` | Concurrent lanes |
-|---|---|---|---|
-| Luna | basic work: inventories, searches, mechanical review, narrow edits | `gpt-6-luna` / `max` | any number |
-| **Sol - the default** | nearly every Codex job: audits, research lanes, verification rounds, implementation | `gpt-6-sol` / `high`; `medium` each once 2-3 Sol lanes run | at most 3 |
-| Astra | only where truly needed: very broad, top-level architecture audit | `gpt-6-astra` / `high` | 1 |
-
-Sol's remit widened with GPT-6: work that went to Astra under the 5.6 models
-(narrow verification rounds, hard bug-fix audits) now defaults to Sol. Reach for
-Astra only when the audit's scope, not its difficulty, demands it. The lane
-caps were measured on the 5.6 models (5 Sep 2026); GPT-6 usage cost is not yet
-measured, so treat them as a starting point.
-
-The GPT-6 models need codex-cli **0.156.1+**: 0.149 rejected `gpt-6-luna` with
-`400 "not supported when using Codex with a ChatGPT account"`, 0.156.1 accepted
-both Luna and Sol (measured 23 Sep 2026). That failure surfaces as exit `1`
-below, not as the toolchain check's exit `3`, whose floor tracks the approval
-schema, not model availability.
 
 **When the harness does not wake you** - a detached `nohup`, a background
 `Start-Process`, a lane launched from another session - `--done-file` is the
@@ -412,6 +496,34 @@ runs is wedged regardless of what `ps` says. dispatch.py kills the worker at
 `--timeout` and exits non-zero, so the ceiling is enforced - but check log
 growth when a lane feels slow instead of waiting the timeout out.
 
+**Write commands the approval filter can approve.** dispatch.py judges every
+command argv token by token and declines anything that names a location
+outside the lane - absolute paths, home references (`~`, `$HOME`,
+`%USERPROFILE%`), and location variables (`%TEMP%`, `$env:TEMP`, `%APPDATA%`,
+`%LOCALAPPDATA%`, `%PROGRAMDATA%`, `%PUBLIC%`). The filter is deliberately
+blunt, so the brief has to meet it. Three rules, each one a measured false
+positive - a lane that a filter had been starving across several rounds ran
+**23 approvals, 0 declines, rc=0** once the brief carried them:
+
+1. **Build fixtures inside the lane**, at `.delegate-runs/<lane>/fixtures/`.
+   A test tree created with `tempfile.mkdtemp()` lands in the system temp
+   directory, which is outside the lane, and every path derived from it is
+   declined.
+2. **Put container paths inside the program text, not in argv.** A container
+   path handed over as its own argument (`docker run ... /workspace/case`) is
+   indistinguishable from a host absolute path; pass it inside the `-c`
+   program string instead, where it is data rather than an operand.
+3. **No argument may begin with `/` or `\`.** This one bites where you least
+   expect it: the regex fragments `'\(e\)|return'` and `'\{'` were read as a UNC
+   path and declined. Anchor patterns differently, or pass them through a
+   file.
+
+The real cure belongs in the tool, and is not there yet: the filter cannot
+know that argv after `docker` belongs to another namespace, and cannot tell a
+regex from a path. Until it can, the brief carries that burden - which is why
+these three lines belong in the brief itself, not in a troubleshooting page
+read after a round has already been starved.
+
 **Check dispatch.py's exit code BEFORE reading FINAL.txt** - and read `5` as
 its own case, not as one more failure:
 
@@ -420,7 +532,7 @@ its own case, not as one more failure:
 | `0` | turn completed, nothing declined | the worker's report |
 | `5` | turn completed, but approvals were **declined** - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
 | `1` | the turn failed, timed out, or the provider refused it | `DISPATCH FAILED: <reason>` - unless it died before the turn began (unreadable prompt file, no codex CLI), where there is no FINAL.txt and the reason is on stderr |
-| `2` `3` `4` | preflight: bad argument, toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
+| `2` `3` `4` | preflight: bad argument, **an ACCEPTANCE command the sandbox would decline** (§4's bridge bullet is the fix), toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
 
 `1` is the case that sends you to §10: read the last ~40 lines of
 RAW_OUTPUT.log for the cause, and never treat a stale report as this round's
@@ -552,10 +664,24 @@ Steps 1 and 2 are one command - the same script that opened the lane closes it:
 # them first, or pass --force if they are genuinely disposable.
 ```
 
-1. **Archive the contract:** copy `SPEC.md`, `turn-*.md`, `FINAL.txt`,
-   `ROUNDS.txt` to `<main-repo>/.delegate-runs/ARCHIVE/<task-id>/`. Until the
-   user reviews the uncommitted diff, the spec is the only record of what was
-   sanctioned - deleting it with the worktree orphans the diff.
+1. **Archive the contract, then verify the archive, then delete.** The order
+   binds, and the middle step is the one that gets skipped: `close` copies
+   `SPEC.md`, `turn-*.md`, `FINAL.txt`, `ROUNDS.txt` and the findings tree to
+   `<main-repo>/.delegate-runs/ARCHIVE/<task-id>/`, compares every copy against
+   its source by sha256, writes `MANIFEST.sha256`, and only then removes the
+   worktree. A mismatch stops the removal and leaves the lane intact.
+
+   The step exists because a copy that silently did not happen looks exactly
+   like one that did, and the next command is irreversible: in one field round
+   nine lanes were removed with their outputs uncopied, and every proof script
+   and finding text in them is unrecoverable. Existence alone is not the test
+   either - a truncated destination passes that - so the check compares
+   content.
+
+   **`.delegate-runs/` is gitignored, so an empty-looking lane can be full.**
+   `git status --porcelain` in a lane says nothing about the run directory,
+   which is exactly where the archive's contents live. Never read a clean
+   status as "there is nothing to archive here".
 2. **Remove the worktree and its trust entry:**
    `git worktree remove --force "$LANE"`, then `git worktree prune`, then
    `doctor.py --untrust "$LANE"`. Not optional, not deferrable: accumulated

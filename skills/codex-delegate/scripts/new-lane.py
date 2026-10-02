@@ -25,6 +25,7 @@ growing trust list were the measured cost of leaving it to memory.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -68,6 +69,14 @@ NOTE FOR THIS TASK: this is an AUDIT task. You produce no product code and you
 fix nothing. Your output is findings files and runnable probes, on disk, under
 the task dir. The contract below is binding and is not a summary of it.
 """
+
+
+def _digest(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def git(args: list[str], cwd: Path | None = None, check: bool = True) -> str:
@@ -224,6 +233,55 @@ def spec_state(lane: Path, task_id: str) -> str:
     return "ok"
 
 
+def write_tool_bridges(td: Path, specs: list[str]) -> list[str]:
+    """Write NAME.cmd/NAME.sh wrappers around executables that live outside the lane.
+
+    The whole trick is where the absolute path sits. dispatch.py's approval
+    filter is a lexical scan of the COMMAND LINE, so `bash -lc
+    "C:/proj/venv/Scripts/python.exe -m pytest"` is declined as an out-of-lane
+    operand - measured 5 Sep 2026, two turns, 0 files written. The same
+    interpreter reached through .delegate-runs/<id>/py.cmd is approved, because
+    the path is inside the script and the filter never reads file contents.
+
+    This is a usability fix, not a hole: the worker could already reach any
+    executable through an approved shell, and the sandbox - not this scan - is
+    what actually contains writes. A venv interpreter is exactly the case the
+    lane model cannot serve on its own, since a worktree gets no venv.
+    """
+    written: list[str] = []
+    for spec in specs:
+        name, sep, target = spec.partition("=")
+        name = name.strip()
+        target = target.strip()
+        if not sep or not name or not target:
+            raise SystemExit(f"BLOCK: --tool expects NAME=PATH, got {spec!r}")
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            raise SystemExit(f"BLOCK: --tool name {name!r} must be letters, digits, "
+                             "dot, dash or underscore - it becomes a filename")
+        resolved = Path(target).expanduser()
+        if not resolved.exists():
+            # A bridge to a missing executable fails inside the worker's turn,
+            # where the error reads as the worker's fault. Fail here instead.
+            raise SystemExit(f"BLOCK: --tool {name} points at {resolved}, which does not exist")
+        resolved = resolved.resolve()
+
+        # newline="" on both: these literals already carry the endings each
+        # file needs, and write_text would translate them again - measured, the
+        # .cmd came out CR CR LF, and the .sh would get CRLF, which /bin/sh
+        # reads as part of the interpreter name on the shebang line.
+        cmd_path = td / f"{name}.cmd"
+        cmd_path.write_text(f'@echo off\r\n"{resolved}" %*\r\n',
+                            encoding="utf-8", newline="")
+        # POSIX form for the sh bridge: Git Bash is the shell Codex reaches on
+        # Windows, and a backslash path inside double quotes is unusable there.
+        sh_path = td / f"{name}.sh"
+        sh_path.write_text(f'#!/bin/sh\nexec "{resolved.as_posix()}" "$@"\n',
+                           encoding="utf-8", newline="")
+        sh_path.chmod(sh_path.stat().st_mode | 0o111)
+        written += [str(cmd_path), str(sh_path)]
+    return written
+
+
 def cmd_open(args: argparse.Namespace) -> int:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", args.task_id):
         # The id becomes a directory name, part of every printed command and a
@@ -266,6 +324,8 @@ def cmd_open(args: argparse.Namespace) -> int:
         if args.spec:
             shutil.copyfile(args.spec, td / "SPEC.md")
             created.append(str(td / "SPEC.md"))
+        if args.tool:
+            created += write_tool_bridges(td, args.tool)
 
         # Written before the seeding so `turn` can find it even if the run dies
         # halfway: it is what stops a later turn from rebuilding an audit
@@ -467,6 +527,7 @@ def cmd_close(args: argparse.Namespace) -> int:
     archive = repo / ".delegate-runs" / "ARCHIVE" / args.task_id
     archive.mkdir(parents=True, exist_ok=True)
     kept = []
+    copied = []                               # source files the archive must match
     if td.is_dir():
         for item in sorted(td.iterdir()):
             if item.name in ("RAW_OUTPUT.log", "PROMPT.txt", "finding-contract.md"):
@@ -474,8 +535,10 @@ def cmd_close(args: argparse.Namespace) -> int:
             dest = archive / item.name
             if item.is_dir():
                 shutil.copytree(item, dest, dirs_exist_ok=True)
+                copied.extend(p for p in sorted(item.rglob("*")) if p.is_file())
             else:
                 shutil.copyfile(item, dest)
+                copied.append(item)
             kept.append(item.name)
     raw = td / "RAW_OUTPUT.log"
     if raw.is_file():
@@ -490,9 +553,39 @@ def cmd_close(args: argparse.Namespace) -> int:
         (archive / "RAW_OUTPUT.tail.log").write_text("\n".join(slice_) + "\n",
                                                      encoding="utf-8")
         kept.append(f"RAW_OUTPUT.tail.log ({len(marked)} approval lines + tail)")
+    # Verify the archive BEFORE the irreversible step. A copy that silently
+    # did not happen looks exactly like one that did, and the next line
+    # destroys the original: a field round removed nine lanes this way and
+    # lost every proof script and finding text they held. Existence is not
+    # enough either - a truncated or empty destination passes that check -
+    # so compare content.
+    mismatch = []
+    for src in copied:
+        dest = archive / src.relative_to(td)
+        try:
+            if not (dest.is_file() and _digest(dest) == _digest(src)):
+                mismatch.append(str(src.relative_to(td)))
+        except OSError as exc:
+            mismatch.append(f"{src.relative_to(td)} ({exc.strerror})")
+    if mismatch:
+        print("BLOCK: the archive does not match the lane - worktree NOT removed.")
+        for name in mismatch[:20]:
+            print(f"  ! {name}")
+        if len(mismatch) > 20:
+            print(f"  ... and {len(mismatch) - 20} more")
+        print(f"Archive: {archive}")
+        print("Free space, permissions and path length are the usual causes.")
+        print("Fix the archive, then run close again - the lane is still intact.")
+        return 1
+    manifest = [f"{_digest(archive / p.relative_to(td))}  {p.relative_to(td)}"
+                for p in copied]
+    (archive / "MANIFEST.sha256").write_text(
+        "\n".join(manifest) + "\n", encoding="utf-8")
+
     print(f"archived -> {archive}")
     for name in kept:
         print(f"  + {name}")
+    print(f"  verified {len(copied)} file(s) by sha256 -> MANIFEST.sha256")
 
     git(["worktree", "remove", "--force", str(lane)], cwd=repo)
     git(["worktree", "prune"], cwd=repo)
@@ -521,6 +614,12 @@ def main() -> int:
                     help="worktree path (default: ../<repo>-lanes/<task-id>)")
     op.add_argument("--mode", choices=list(MODES), default="worker")
     op.add_argument("--spec", type=Path, default=None, help="SPEC.md to install in the lane")
+    op.add_argument("--tool", action="append", default=[], metavar="NAME=PATH",
+                    help="wrap an out-of-lane executable (a project venv interpreter, "
+                         "a toolchain binary) in a lane-local NAME.cmd/NAME.sh the "
+                         "acceptance command can call. Repeatable. Without this, an "
+                         "acceptance command naming the path directly is declined by "
+                         "the sandbox and the turn produces nothing.")
     op.add_argument("--turn", type=int, default=1)
     op.add_argument("--no-trust", action="store_true",
                     help="skip doctor.py --trust (the worker will not run without it)")
