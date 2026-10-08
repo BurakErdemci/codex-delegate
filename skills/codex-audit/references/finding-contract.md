@@ -52,7 +52,7 @@ contract yields to salvage.
 
 ## The one hard rule
 
-**A finding without a runnable proof is a hypothesis, not a vulnerability.**
+**A finding without a runnable proof is a hypothesis, not a defect.**
 
 `probes/<name>.<ext>` must be self-contained, take no arguments, exit non-zero
 on the current code, and be something that would exit zero once the flaw is
@@ -187,8 +187,8 @@ confidence: verified-empirically | partially-verified | unverified
 
 **What:** one or two sentences. What is wrong, mechanically.
 
-**How it fails:** concrete inputs or state -> the wrong outcome. Not "could be
-exploited" - the actual sequence.
+**How it fails:** concrete inputs or state -> the wrong outcome. Not "could go
+wrong" - the actual sequence.
 
 **Proof:** what probes/<name>.<ext> does and what it prints when it fails.
 ```
@@ -217,7 +217,7 @@ Field notes:
   where it costs one reading, instead of in the verification round, where it
   costs a turn. Hygiene findings write `green_when: n/a (hygiene)`.
 - **`reachable`** is the field that separates a finding from trivia. "Any
-  unauthenticated caller via POST /orders" is a finding. "A developer editing
+  client that can reach POST /orders, without signing in" is a finding. "A developer editing
   this file by hand" is not. If the only path to it is someone already having
   full access, say so - that lowers severity honestly rather than inflating it.
 - **`severity`** is about consequence times reachability, not about how clever

@@ -48,6 +48,28 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.13.1
+
+**The skill primed the attack framing it warns against.** `codex-audit` opened
+with "a Codex red team hunts vulnerabilities" and a table row saying the lane
+"tears the project apart"; the measurement-form rule lived in
+`references/lenses.md`, which the architect never opened. Measured in one
+field session: an audit brief written from SKILL.md alone began "Red-team
+audit" and asked what an unauthenticated LAN caller could do. The lane was
+killed mid-turn with `cyberPolicy` after 7 probes (findings survived on disk).
+The verification round on the fix, same codebase and lane machinery, was
+written as "measure whether the code does what it claims": it ran to the end,
+`rc=0`, 0 `cyberPolicy` lines in `RAW_OUTPUT.log`. One pair, not a rate.
+
+So the rule moved to where the brief is written: SKILL.md now says up front
+that "red team" is the architect's model and never brief text, and the SPEC.md
+step points at the lenses.md section and asks for a vocabulary grep of the
+finished brief. `finding-contract.md` goes to the worker verbatim, so its
+"vulnerability", "exploited" and "unauthenticated caller" examples were
+replaced with neutral wording. Not measured: whether the lighter description
+changes refusal rates on command-gate topics, which SKILL.md §3 already
+records as refused even in verification form.
+
 ## v2.12.0
 
 **A spec that contradicts the worker contract produces no result, not a worse

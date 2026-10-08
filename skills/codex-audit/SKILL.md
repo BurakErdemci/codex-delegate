@@ -1,6 +1,6 @@
 ---
 name: codex-audit
-description: Audit a codebase with outside eyes - a Codex red team hunts vulnerabilities, fragility and vibe-code residue in a disposable worktree, Claude verifies every finding against the live tree, fixes what survives and promotes each proof into a permanent regression test. Use when the user asks to audit the day's work, asks to harden a codebase to production quality, or explicitly asks for a comprehensive refactor.
+description: Audit a codebase with outside eyes - an independent Codex lane measures defects, fragility and vibe-code residue in a disposable worktree, Claude verifies every finding against the live tree, fixes what survives and promotes each proof into a permanent regression test. Use when the user asks to audit the day's work, asks to harden a codebase to production quality, or explicitly asks for a comprehensive refactor.
 ---
 
 # codex-audit - outside eyes on code Claude wrote
@@ -11,9 +11,9 @@ claim it makes through a gate before acting on any of it.
 
 The division:
 
-| | Codex red team | Claude |
+| | Codex audit lane | Claude |
 |---|---|---|
-| Hunting | tears the project apart in a throwaway worktree | writes the brief, picks the lenses |
+| Finding | measures the project against its own claims in a throwaway worktree | writes the brief, picks the lenses |
 | Evidence | must ship a runnable proof per finding | runs that proof; a claim that will not reproduce is dead |
 | Judgement | none - it reports candidates | decides what is real, reachable, worth fixing |
 | Fixing | never | does the fix, proven by the proof flipping red -> green |
@@ -23,6 +23,19 @@ context. A security fix is judgment work, which `codex-delegate` §0 puts on the
 architect-only surface. Claude has the codebase in its head; the red team does
 not, and a fix from a model that has read one lens of the project is how a
 patch closes one hole and opens another.
+
+**This document calls the Codex lane a "red team". That word is the
+architect's mental model, never brief text.** Every sentence that reaches Codex
+- SPEC.md, the lens brief, a retry note - is written as a measurement: the
+claim the code makes, the comparison that tests it, the probe that records the
+result (`references/lenses.md`, "Ask for a measurement, not for an attack").
+Keep "red team", "attack", "attacker", "exploit", "break", "what an
+unauthenticated caller can do" out of it. Measured 8 Oct 2026: a brief that
+opened with "Red-team audit" and asked what an unauthenticated LAN caller
+could do was killed mid-turn with `cyberPolicy`; the verification brief that
+followed on the same codebase, same lane machinery, written as "measure
+whether the code does what it claims", ran to completion. Reading this skill
+top to bottom primes the attack framing; the brief is where it has to stop.
 
 **Requires the `codex-delegate` plugin** for `dispatch.py` / `doctor.py` and the
 lane model. This skill is the audit protocol on top of that machinery.
@@ -250,8 +263,10 @@ rather than six steps typed six times:
 # is yours: the lens brief is the judgment this script will not fake.
 ```
 
-Write `SPEC.md` (the lens brief - `references/lenses.md`), then ask for the
-dispatch line again:
+Write `SPEC.md` (the lens brief - `references/lenses.md`) **in measurement
+form** - read that file's "Ask for a measurement, not for an attack" section
+before the first line, and grep the finished brief for attack vocabulary - then
+ask for the dispatch line again:
 
 ```bash
 "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" turn \

@@ -5,9 +5,10 @@ the labour, Claude keeps the judgement.**
 
 - **`codex-delegate`** hands implementation work to **parallel Codex worker
   lanes**, each in its own git worktree, while Claude stays the architect.
-- **`codex-audit`** turns that machinery around: a Codex **red team** attacks
-  the code Claude wrote, Claude verifies every finding before acting on it, and
-  the fix itself goes back through the red team before the work is called done.
+- **`codex-audit`** turns that machinery around: an independent Codex lane
+  measures the code Claude wrote against what it claims to do, Claude verifies
+  every finding before acting on it, and the fix itself goes back through the
+  same lane before the work is called done.
 
 Every rule in these skills came from something breaking in real use. The log,
 with the measurement behind each rule, is in [FIELD-LOG.md](FIELD-LOG.md).
@@ -127,13 +128,13 @@ per dispatch.
 ## codex-audit - outside eyes on your own code
 
 Claude wrote the codebase, so Claude is the wrong auditor for it. Ask it to
-audit the day's work and it briefs a Codex red team from `git diff` (not from
+audit the day's work and it briefs an independent Codex lane from `git diff` (not from
 its memory of the session - a narrative brief audits your intentions, the diff
 audits your code), classifies the threat surface, and sends one lens per lane
 into disposable worktrees where the sandbox holds but nothing is off-limits.
 
 Then the part that makes it usable: **a finding without a runnable proof is a
-hypothesis, not a vulnerability.** Every finding ships a probe that is red now
+hypothesis, not a defect.** Every finding ships a probe that is red now
 and green once fixed - and the probe has to exercise behaviour rather than grep
 the source, because a fix that changes the wording of the code would flip a
 grep without changing anything real. Claude runs every proof first: findings
@@ -143,7 +144,7 @@ ones get an agent whose job is to *refute* them.
 
 **Then the fix goes through the same gate.** A fix is fresh, unaudited code,
 and the loop does not end when the probe turns green: a verification round
-takes the fix diff back to the red team, and every finding it returns gets a
+takes the fix diff back to the audit lane, and every finding it returns gets a
 written verdict - *blocker* (real, reachable, fix it and go round again),
 *guard* (unlikely only because a human habit prevents it, so the habit becomes
 a check), or *demoted* (with the assumption it rests on named out loud). The
