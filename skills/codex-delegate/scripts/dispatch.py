@@ -384,7 +384,109 @@ def enrich_file_change(params: dict, items_by_id: dict) -> dict:
     return params
 
 
-def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, str]:
+# Git policy. A linked worktree shares refs, stash, config and the object store
+# with the main repo, so branch -f, tag, update-ref, stash, config, gc, prune and
+# worktree run from a lane change the main repo; commits on the lane's detached
+# HEAD only move that lane's HEAD. Network subcommands are refused everywhere.
+# Measured on macOS: `git push origin main` was approved ("command scoped to
+# lane") because the filter never looked at git.
+_GIT_NETWORK = frozenset({"push", "fetch", "pull", "remote", "ls-remote", "clone",
+                          "submodule", "send-email", "request-pull"})
+_GIT_LANE_SAFE = frozenset({"status", "diff", "log", "show", "rev-parse", "ls-files",
+                            "blame", "grep", "shortlog", "describe", "cat-file",
+                            "add", "commit"})
+_SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "cmd", "powershell", "pwsh"})
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[;&|\n]")
+
+
+def _program_name(token: str) -> str:
+    name = os.path.basename(token.strip(_TOKEN_WRAP).replace("\\", "/")).lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _git_invocations(command: str | list) -> list[list[str]]:
+    """Every git invocation (argv, program first) found in the command.
+
+    A direct argv is one invocation when argv[0] is git. Through a shell the
+    remaining text is cut at &&, ||, ;, & and | - over-splitting is the safe
+    direction, it can only turn a quoted separator into an extra segment.
+    """
+    if isinstance(command, list) and command and _program_name(str(command[0])) == "git":
+        return [[str(t) for t in command]]
+    if isinstance(command, list):
+        if not command or _program_name(str(command[0])) not in _SHELL_PROGRAMS:
+            return []
+        text = " ".join(str(t) for t in command[1:])
+    else:
+        text = command
+    found: list[list[str]] = []
+    for segment in _SEGMENT_SPLIT.split(text):
+        tokens = [t.strip("'\"") for t in segment.split()]
+        while tokens and (tokens[0].startswith(("-", "/")) or "=" in tokens[0]):
+            tokens.pop(0)
+        if tokens and _program_name(tokens[0]) == "git":
+            found.append(tokens)
+    return found
+
+
+def _real_is_repo(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def _in_temp_repo(effective: str, lane_root: Path, is_repo) -> bool:
+    """Is effective inside a repo of its own under <lane>/.delegate-runs/?
+
+    A directory there that is not a repo makes git walk up to the lane's repo,
+    whose refs, stash and config are the main repo's. So the exemption needs a
+    .git entry on the path between effective and the lane root (exclusive).
+    """
+    runs_dir = lane_root / ".delegate-runs"
+    current = Path(effective)
+    while _inside_lane(str(current), runs_dir) and current != lane_root:
+        if is_repo(current):
+            return True
+        if current.parent == current:
+            break
+        current = current.parent
+    return False
+
+
+def _git_verdict(command: str | list, lane_root: Path, cwd_abs: str,
+                 is_repo=_real_is_repo) -> str | None:
+    """Reason to decline the git invocations in this command, or None."""
+    runs_dir = lane_root / ".delegate-runs"
+    for argv in _git_invocations(command):
+        effective = cwd_abs
+        i = 1
+        while i < len(argv) and argv[i].startswith("-"):
+            opt = argv[i]
+            if opt == "-C" and i + 1 < len(argv):
+                effective = os.path.normpath(os.path.join(effective, argv[i + 1]))
+                i += 2
+            elif opt in ("--no-pager", "-P"):
+                i += 1
+            elif opt == "-c" or opt.startswith("-c"):
+                return "git -c is declined (it can switch off hooks and safety settings)"
+            else:
+                return f"git global option {opt!r} is not allowed"
+        if i >= len(argv):
+            return "git without a subcommand"
+        sub = argv[i]
+        if not _inside_lane(effective, lane_root):
+            return f"git directory outside lane: {effective!r}"
+        if sub in _GIT_NETWORK:
+            return f"git {sub} reaches the network and is declined"
+        if _inside_lane(effective, runs_dir) and (
+                sub == "init" or _in_temp_repo(effective, lane_root, is_repo)):
+            continue
+        if sub not in _GIT_LANE_SAFE:
+            return (f"git {sub} can change shared repository state and is declined "
+                    "outside .delegate-runs/")
+    return None
+
+
+def approval_decision(method: str, params: dict, lane_root: Path, *,
+                      is_repo=_real_is_repo) -> tuple[str, str]:
     """Windows decision for one sandbox approval: ("approve"|"decline", reason).
 
     Pure - no I/O, no process state - so the containment boundary is testable
@@ -422,6 +524,9 @@ def approval_decision(method: str, params: dict, lane_root: Path) -> tuple[str, 
         cwd_abs = os.path.normpath(os.path.join(str(lane_root), req_cwd or ""))
         if not _inside_lane(cwd_abs, lane_root):
             return "decline", f"cwd outside lane: {req_cwd!r}"
+        git_reason = _git_verdict(command, lane_root, cwd_abs, is_repo)
+        if git_reason:
+            return "decline", git_reason
         # A -Command one-liner arrives as a single argv element; split every
         # element on whitespace so paths embedded inside the script text are
         # judged too, not just the outer argv.

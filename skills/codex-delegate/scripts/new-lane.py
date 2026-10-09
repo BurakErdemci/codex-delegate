@@ -465,6 +465,67 @@ def drop_exclude_block(lane: Path) -> None:
     path.write_text("".join(kept), encoding="utf-8", newline="")
 
 
+def _inside_real(path: Path, root: Path) -> bool:
+    """Is path, after resolving every symlink, inside root's real path?
+
+    Measured: link_into only rejected absolute and `..` config paths, so a repo
+    path that is itself a symlink to outside the repo was linked into the lane
+    and handed the worker a writable door to that directory.
+    """
+    real, base = os.path.realpath(path), os.path.realpath(root)
+    try:
+        return os.path.commonpath([os.path.normcase(real), os.path.normcase(base)]) == os.path.normcase(base)
+    except ValueError:                              # different drives
+        return False
+
+
+def remaining_links(lane: Path, rels: list[str]) -> list[str]:
+    """Recorded link paths that still exist after unlink_links ran."""
+    return [rel for rel in rels if os.path.lexists(lane / rel)]
+
+
+def link_block(lane: Path, left: list[str]) -> int:
+    print(f"BLOCK: could not remove {len(left)} link(s) from {lane}; the worktree was NOT "
+          "removed, because removing it could walk through a link into the real target:")
+    for rel in left:
+        print(f"  ! {lane / rel}")
+    print("Fix the cause (permissions, a lock), then run close again - the lane is still usable.")
+    return 1
+
+
+def lane_fingerprint(lane: Path) -> str:
+    """Digest of the lane's uncommitted work outside .delegate-runs.
+
+    integrate copies the lane's changes into the main tree and leaves the lane
+    as it was; close compares this digest with the one integrate recorded, so
+    changes made after integrating are still caught.
+    """
+    exclude = [".", ":(exclude).delegate-runs"]
+    h = hashlib.sha256()
+    tracked = subprocess.run(["git", "diff", "HEAD", "--binary", "--", *exclude], cwd=str(lane),
+                             capture_output=True).stdout
+    h.update(tracked)
+    others = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z",
+                             "--", *exclude], cwd=str(lane), capture_output=True).stdout
+    for raw in sorted(x for x in others.split(b"\0") if x):
+        rel = raw.decode("utf-8", errors="replace")
+        h.update(raw + b"\0")
+        path = lane / rel
+        if path.is_file() and not path.is_symlink():
+            h.update(_digest(path).encode())
+        elif path.is_symlink():
+            h.update(os.readlink(path).encode())
+    return h.hexdigest()
+
+
+def read_record(td: Path) -> dict:
+    try:
+        record = json.loads((td / "lane.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return record if isinstance(record, dict) else {}
+
+
 def link_into(repo: Path, lane: Path, rels: list[str]) -> list[str]:
     """Link each repo-relative path into the lane and hide it from `git status`.
 
@@ -477,6 +538,10 @@ def link_into(repo: Path, lane: Path, rels: list[str]) -> list[str]:
             source = repo / rel
             if not source.exists():
                 raise SystemExit(f"BLOCK: {CONFIG_NAME} links {rel!r}, which does not exist in {repo}")
+            if not _inside_real(source, repo):
+                raise SystemExit(f"BLOCK: {CONFIG_NAME} links {rel!r}, which resolves to "
+                                 f"{os.path.realpath(source)} - outside {repo}. A link "
+                                 "must lead somewhere inside the repo")
             dest = lane / rel
             if os.path.lexists(dest):
                 raise SystemExit(f"BLOCK: cannot link {rel!r}: {dest} already exists in the lane")
@@ -778,8 +843,8 @@ def cmd_close(args: argparse.Namespace) -> int:
     # worktree takes its reflog with it - the objects survive with nothing
     # pointing at them. Measured: a lane whose work was committed closed with
     # rc=0, a clean status, and an archive holding only the run files. Workers
-    # never run git, so this is the architect's own commit and it is the one
-    # thing here that cannot be recovered from the archive.
+    # may commit on the lane's detached HEAD, and those commits are the one
+    # thing here that cannot be recovered from the archive - `integrate` moves them.
     recorded = None
     try:
         record = json.loads((td / "lane.json").read_text(encoding="utf-8"))
@@ -788,6 +853,7 @@ def cmd_close(args: argparse.Namespace) -> int:
             recorded = None
     except (OSError, ValueError):
         recorded = None
+    record_now = read_record(td)
     if not args.force:
         if recorded is None:
             # An unreadable record must not downgrade a guard on a destructive
@@ -801,7 +867,7 @@ def cmd_close(args: argparse.Namespace) -> int:
                 "this lane carries unintegrated commits is unknown. Check with "
                 f"`git -C {lane} log --oneline`, then pass --force to remove it anyway.")
         head = git(["rev-parse", "HEAD"], cwd=lane, check=False)
-        if head and head != recorded:
+        if head and head != recorded and head != record_now.get("integrated_head"):
             raise SystemExit(
                 f"BLOCK: the lane is at {head[:12]}, not the base {recorded[:12]} it was "
                 "opened from - it carries commits that exist nowhere else. Integrate "
@@ -821,9 +887,16 @@ def cmd_close(args: argparse.Namespace) -> int:
         link_rels = load_config(repo)["links"]
     unlink_links(lane, link_rels)
     verify_sources(repo, link_rels)
+    left = remaining_links(lane, link_rels)
+    if left:
+        return link_block(lane, left)
 
     dirty = git(["status", "--porcelain", "-uall", "--", ".", ":(exclude).delegate-runs"],
                 cwd=lane, check=False)
+    if (dirty and not args.force and record_now.get("integrated_tree")
+            and git(["rev-parse", "HEAD"], cwd=lane, check=False) == record_now.get("integrated_head")
+            and lane_fingerprint(lane) == record_now["integrated_tree"]):
+        dirty = ""
     if dirty and not args.force:
         print("BLOCK: the lane has changes outside .delegate-runs that are not archived:")
         print(dirty)
@@ -908,6 +981,88 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_integrate(args: argparse.Namespace) -> int:
+    lane = Path(args.lane).resolve()
+    if not (lane / ".git").exists():
+        raise SystemExit(f"BLOCK: {lane} is not a git worktree - check --lane")
+    main = main_repo_of(lane)
+    if not is_linked_worktree(lane):
+        raise SystemExit(f"BLOCK: {lane} is the main tree, not a lane")
+    td = task_dir(lane, args.task_id)
+    record = read_record(td)
+    base = record.get("base_sha")
+    if not isinstance(base, str) or not base:
+        raise SystemExit(f"BLOCK: cannot read a base commit from {td / 'lane.json'} - "
+                         "integrating without it could copy the wrong range")
+    link_rels = [x for x in record.get("links", []) if isinstance(x, str)]
+    head = git(["rev-parse", "HEAD"], cwd=lane)
+
+    dirty = git(["status", "--porcelain", "-uall", "--", ".", ":(exclude).delegate-runs"],
+                cwd=main, check=False)
+    if dirty:
+        print(f"BLOCK: the main tree {main} has uncommitted changes; integrating on top of them "
+              "would mix them with the lane's:")
+        print(dirty)
+        print("Commit or stash them, then run integrate again.")
+        return 1
+
+    commits = git(["rev-list", "--reverse", f"{base}..{head}"], cwd=lane).split()
+    if commits and record.get("integrated_head") != head:
+        out = subprocess.run(["git", "cherry-pick", *commits], cwd=str(main),
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if out.returncode != 0:
+            subprocess.run(["git", "cherry-pick", "--abort"], cwd=str(main), capture_output=True)
+            print(f"BLOCK: cherry-picking {len(commits)} lane commit(s) onto the main tree failed "
+                  "and was aborted; the main tree is unchanged:")
+            print((out.stdout + out.stderr).strip())
+            return 1
+        print(f"cherry-picked {len(commits)} commit(s) onto the main tree")
+
+    exclude = [".", ":(exclude).delegate-runs"]
+    patch = subprocess.run(["git", "diff", "HEAD", "--binary", "--", *exclude], cwd=str(lane),
+                           capture_output=True).stdout
+    others = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z",
+                             "--", *exclude], cwd=str(lane), capture_output=True).stdout
+    untracked = []
+    for raw in sorted(x for x in others.split(b"\0") if x):
+        rel = raw.decode("utf-8", errors="replace")
+        if any(rel == link or rel.startswith(link.rstrip("/") + "/") for link in link_rels):
+            continue
+        untracked.append(rel)
+    clash = [rel for rel in untracked if os.path.lexists(main / rel)]
+    if clash:
+        print("BLOCK: these lane files are untracked there but already exist in the main tree; "
+              "nothing of the uncommitted work was copied:")
+        for rel in clash:
+            print(f"  ! {rel}")
+        return 1
+    if patch:
+        check = subprocess.run(["git", "apply", "--binary", "--check"], cwd=str(main),
+                               input=patch, capture_output=True)
+        if check.returncode != 0:
+            print("BLOCK: the lane's uncommitted diff does not apply to the main tree; "
+                  "nothing of the uncommitted work was copied:")
+            print(check.stderr.decode("utf-8", errors="replace").strip())
+            return 1
+        applied = subprocess.run(["git", "apply", "--binary"], cwd=str(main),
+                                 input=patch, capture_output=True)
+        if applied.returncode != 0:
+            raise SystemExit("BLOCK: git apply failed after a clean --check: "
+                             + applied.stderr.decode("utf-8", errors="replace").strip())
+    for rel in untracked:
+        target = main / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(lane / rel, target, follow_symlinks=False)
+
+    record["integrated_head"] = head
+    record["integrated_tree"] = lane_fingerprint(lane)
+    (td / "lane.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
+    print(f"integrated {lane} into {main}: {len(commits)} commit(s), "
+          f"{'a tracked diff, ' if patch else ''}{len(untracked)} untracked file(s)")
+    print("The uncommitted part is in the main tree as plain working-tree changes - review, then commit.")
+    return 0
+
+
 def cmd_blind_open(args: argparse.Namespace) -> int:
     repo = repo_root(args.repo)
     if is_linked_worktree(repo):
@@ -965,6 +1120,9 @@ def cmd_blind_close(args: argparse.Namespace) -> int:
     main = main_repo_of(wt)
     unlink_links(wt, rels)
     verify_sources(main, rels)
+    left = remaining_links(wt, rels)
+    if left:
+        return link_block(wt, left)
     git(["worktree", "remove", "--force", str(wt)], cwd=main)
     git(["worktree", "prune"], cwd=main)
     verify_sources(main, rels)
@@ -1022,6 +1180,11 @@ def main() -> int:
     cp.add_argument("--no-untrust", action="store_true",
                     help="leave the worker config alone (for lanes opened with --no-trust)")
     cp.set_defaults(func=cmd_close)
+
+    ip = sub.add_parser("integrate", help="move a lane's commits and uncommitted changes into the main tree")
+    ip.add_argument("--lane", type=Path, required=True)
+    ip.add_argument("--task-id", required=True)
+    ip.set_defaults(func=cmd_integrate)
 
     bo = sub.add_parser("blind-open", help="detached blind-audit worktree with links and verify/")
     bo.add_argument("--repo", type=Path, default=Path.cwd())

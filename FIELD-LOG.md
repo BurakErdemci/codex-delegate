@@ -48,6 +48,46 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.15.0
+
+**A lane that tested lane tooling was refused by Codex, and the filter did not
+look at git at all.** Rule 1 of the contract forbade every git command, so a
+lane whose acceptance script builds temp git repos could not run. Measured on
+macOS: `git push origin main` was approved by `approval_decision` ("command
+scoped to lane"), because the filter never inspected git. A linked worktree
+shares refs, stash, config and the object store with the main repo, so
+`branch -f`, `tag`, `update-ref`, `stash`, `config`, `gc`/`prune` and `worktree`
+from a lane change the main repo; commits on the lane's detached HEAD only move
+that lane's HEAD. `test_approvals.py` had 5 FAIL lines on macOS because its
+OUTSIDE fixtures were Windows paths; the filter itself declined the POSIX
+equivalents correctly. `close` only warned when a link could not be removed and
+then force-removed the worktree: measured, a link in a read-only parent left
+the lane half-removed (`git rev-parse --git-common-dir` failed after), and on
+Windows the same path would walk a junction into the real venv. `link_into`
+checked a config link for absolute / `..` but not where it resolves, so a repo
+symlink pointing outside the repo was linked into the lane.
+
+What changed: workers may read with git and `add`/`commit` on the detached
+HEAD, and use any non-network git inside the task dir's `tmp/`; the approval
+filter enforces that per git invocation (`-C` resolved, `-c` declined, each
+`&&`/`||`/`;`/`|` segment of a shell string judged); `new-lane.py integrate`
+cherry-picks the lane's commits into the main tree and copies its uncommitted
+changes, and `close` accepts a lane whose HEAD and uncommitted state match what
+integrate recorded; `close` and `blind-close` block before any worktree removal
+while a recorded link is still there; `link_into` refuses a source whose real
+path is outside the repo; `test_approvals.py` fixtures are platform-aware.
+
+Not tested: the Windows junction path (`os.rmdir` of a junction that cannot be
+removed) and the Windows git-policy paths (drive-letter `-C` values,
+`cmd /c git ...`); the acceptance script ran on macOS only. The `.delegate-runs/` exemption is not lexical alone: a
+directory there that is not a repo of its own made git walk up to the lane's
+repo (`git -C .delegate-runs/x branch -f main HEAD` would move the main repo's
+branch), so the exemption now holds only for `init` or when a directory between
+the effective dir and the lane root carries a `.git` entry (checked through an
+injectable predicate, so `approval_decision` stays testable).
+
+---
+
 ## v2.14.0
 
 **Every lane in a Python+Node project cost 5-6 hand commands after `open`.**

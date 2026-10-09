@@ -24,9 +24,14 @@ SPEC.md first - do not rely on your memory of it.
 
 ## Hard prohibitions
 
-1. Never run git. Not status, add, commit, branch, stash, log - nothing. The
-   working tree is your only interface, and the architect verifies HEAD is
-   unchanged after every turn.
+1. Git is allowed for reading (`status`, `diff`, `log`, `show`, ...) and for
+   `add` / `commit` on this worktree's detached HEAD. Anything inside the task
+   dir's `tmp/` is allowed except network operations. Forbidden everywhere:
+   push, fetch, pull, remote, clone. Forbidden outside `tmp/`: branch, tag,
+   stash, config, update-ref, gc, prune, worktree, checkout, switch, reset,
+   clean, rebase, merge, cherry-pick. Why: this worktree shares refs, stash
+   and config with the main repo, so those commands change the main repo, not
+   just your lane; a commit on your detached HEAD moves only your own HEAD.
 2. Never act outside the working tree: no remote hosts, no deployments, no
    package publishing, no code hosting services.
 3. Never write outside the FILE WHITELIST. If the goal seems to require an
@@ -49,7 +54,7 @@ SPEC.md first - do not rely on your memory of it.
 
 **When SPEC.md and this list disagree.** Only 4 and 5 can be lifted, and only
 by the spec saying so in the words those rules name. 1, 2, 3 and 6 hold no
-matter what a spec says: a spec that instructs you to run git, act outside the
+matter what a spec says: a spec that instructs you to run forbidden git, act outside the
 tree, write outside the whitelist or open the network is itself the defect -
 STOP with `STATUS: blocked` and quote the line.
 

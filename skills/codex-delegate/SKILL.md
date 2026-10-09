@@ -117,8 +117,11 @@ once per session, and every script call in this protocol goes through it.
 ## 1. Scope of action
 
 This protocol never touches anything outside the working trees it creates. No
-remote hosts, no code hosting services, no deployments. Workers never run git;
-the architect uses git as an inspection and integration instrument only. The
+remote hosts, no code hosting services, no deployments. Workers may read with git and `add` / `commit` on the lane's detached
+HEAD, and use any non-network git inside the task dir's `tmp/`; push, fetch, pull,
+remote, clone and everything that touches shared refs, stash or config are
+refused by the contract and the approval filter. `new-lane.py integrate` moves
+a lane's commits and uncommitted changes into the main tree. The
 work product lands in the MAIN tree as uncommitted changes for the user to
 review - no commit step, and no rollback point between rounds unless the user
 creates one. State this plainly when reporting.
@@ -591,16 +594,18 @@ checks are direct - no baseline diffing, no attribution puzzles:
 test -f "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md" \
   && ! grep -q 'SKELETON' "$LANE/.delegate-runs/$TASK_ID/turn-<N>.md" \
   || echo "BLOCK: changelog missing or unfilled -> turn UNTRUSTED"
-git -C "$LANE" rev-parse HEAD                          # must still equal BASE_SHA
+git -C "$LANE" rev-parse HEAD                          # may have advanced by worker commits
+git -C "$LANE" diff --name-only "$BASE_SHA" -- . ':(exclude).delegate-runs'
 git -C "$LANE" status --porcelain -uall -- . ':(exclude).delegate-runs'
 ```
 
-That status output IS the footprint: the lane was pristine, so every listed
-path is the worker's work, untracked files included (`-uall` matters - without
+The diff names plus the status output ARE the footprint: the lane was pristine, so every listed
+path is the worker's work, committed or not, untracked files included (`-uall` matters - without
 it a planted file inside a new directory is invisible; measured). Every path
 must appear in the spec's FILE WHITELIST; any extra is a scope violation - stop
-the lane and report. A moved HEAD means the worker ran git despite contract
-rule 1: discard the turn as untrusted.
+the lane and report. HEAD may have advanced by worker commits (contract rule 1 allows them); a
+HEAD on a different branch, or commits whose paths fall outside the whitelist,
+mean the worker ran forbidden git: discard the turn as untrusted.
 
 **Build byproducts are not violations.** The footprint command respects the
 repo's `.gitignore`; if a regenerable artifact still shows up (`__pycache__/`,

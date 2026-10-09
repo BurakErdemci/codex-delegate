@@ -16,6 +16,7 @@ declines everything contains nothing, it just stops the work.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -26,9 +27,18 @@ dsp = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dsp)
 
 LANE = Path("C:/lanes/demo") if sys.platform == "win32" else Path("/lanes/demo")
-OUTSIDE = "C:/project/Backend/venv/Scripts/python.exe"
+WIN = sys.platform == "win32"
+OUTSIDE = "C:/project/Backend/venv/Scripts/python.exe" if WIN else "/Users/x/project/venv/bin/python"
+ESCAPE = "..\\..\\secrets.txt" if WIN else "../../secrets.txt"
+GATE_VENV = "C:/proj/venv/Scripts/python.exe" if WIN else "/Users/x/proj/venv/bin/python"
+TASK_TMP = ".delegate-runs/t1/tmp/repo"
 CMD = "item/commandExecution/requestApproval"
 FILE = "item/fileChange/requestApproval"
+
+def _stub_is_repo(path: Path) -> bool:
+    return os.path.normcase(os.path.normpath(str(path))) == os.path.normcase(
+        os.path.normpath(str(LANE / TASK_TMP)))
+
 
 # (expected, method, params, why this case exists)
 CASES = [
@@ -56,7 +66,7 @@ CASES = [
      "/etc is a path, not a switch - the shape test has to tell them apart"),
     ("decline", CMD, {"command": ["bash", "-lc", f"{OUTSIDE} -m pytest"], "cwd": "."},
      "an out-of-lane interpreter reached through a shell is an operand"),
-    ("decline", CMD, {"command": ["cmd", "/c", "type", "..\\..\\secrets.txt"], "cwd": "."},
+    ("decline", CMD, {"command": ["cmd", "/c", "type", ESCAPE], "cwd": "."},
      "relative escape out of the lane"),
     ("decline", CMD, {"command": ["cmd", "/c", "set", ">", "%TEMP%\\out.txt"], "cwd": "."},
      "location env vars are absolute paths in disguise"),
@@ -66,6 +76,49 @@ CASES = [
      "a payload we cannot scope is a payload we decline"),
     ("decline", "item/somethingNew/requestApproval", {"command": ["echo", "hi"]},
      "an unknown approval method must never be approved by accident"),
+
+    # --- git policy: safe subset in the lane, anything but network in task tmp
+    ("approve", CMD, {"command": ["git", "status"], "cwd": "."}, "reading is always fine"),
+    ("approve", CMD, {"command": ["git", "diff", "--stat"], "cwd": "."}, "reading is always fine"),
+    ("approve", CMD, {"command": ["git", "log", "--oneline", "-5"], "cwd": "."}, "reading is always fine"),
+    ("approve", CMD, {"command": ["git", "add", "-A"], "cwd": "."}, "add on the lane's detached HEAD"),
+    ("approve", CMD, {"command": ["git", "commit", "-m", "Add a"], "cwd": "."},
+     "commit moves only the lane's own HEAD"),
+    ("approve", CMD, {"command": ["git", "--no-pager", "-C", TASK_TMP, "init", "-q"], "cwd": "."},
+     "temp test repos under .delegate-runs are the worker's own"),
+    ("approve", CMD, {"command": ["git", "-C", TASK_TMP, "branch", "feature"], "cwd": "."},
+     "branch is fine inside a temp repo"),
+    ("approve", CMD, {"command": ["git", "stash"], "cwd": TASK_TMP}, "cwd inside task tmp counts too"),
+    ("approve", CMD, {"command": ["bash", "-lc", "git status && git diff"], "cwd": "."},
+     "every segment is safe"),
+    ("decline", CMD, {"command": ["git", "push", "origin", "main"], "cwd": "."}, "network"),
+    ("decline", CMD, {"command": ["git", "fetch"], "cwd": "."}, "network"),
+    ("decline", CMD, {"command": ["git", "pull"], "cwd": "."}, "network"),
+    ("decline", CMD, {"command": ["git", "remote", "add", "o", "x"], "cwd": "."}, "network config"),
+    ("decline", CMD, {"command": ["git", "-C", ".delegate-runs/t1/tmp/notrepo", "branch", "-f", "main", "HEAD"],
+                      "cwd": "."}, "a directory under .delegate-runs without its own .git resolves to the lane repo"),
+    ("approve", CMD, {"command": ["git", "-C", ".delegate-runs/t1/tmp/notrepo", "init", "-q"], "cwd": "."},
+     "init creates the temp repo"),
+    ("approve", CMD, {"command": ["git", "-C", TASK_TMP + "/sub", "stash"], "cwd": "."},
+     "a subdirectory of a temp repo belongs to it"),
+    ("decline", CMD, {"command": ["git", "push"], "cwd": TASK_TMP}, "network is refused even in task tmp"),
+    ("decline", CMD, {"command": ["git", "-C", TASK_TMP, "fetch"], "cwd": "."}, "same through -C"),
+    ("decline", CMD, {"command": ["git", "branch", "-f", "main", "HEAD"], "cwd": "."}, "shared refs"),
+    ("decline", CMD, {"command": ["git", "tag", "v1"], "cwd": "."}, "shared refs"),
+    ("decline", CMD, {"command": ["git", "stash"], "cwd": "."}, "shared stash"),
+    ("decline", CMD, {"command": ["git", "config", "user.name", "x"], "cwd": "."}, "shared config"),
+    ("decline", CMD, {"command": ["git", "update-ref", "refs/heads/main", "HEAD"], "cwd": "."}, "shared refs"),
+    ("decline", CMD, {"command": ["git", "gc"], "cwd": "."}, "shared object store"),
+    ("decline", CMD, {"command": ["git", "worktree", "list"], "cwd": "."}, "shared worktree list"),
+    ("decline", CMD, {"command": ["git", "checkout", "main"], "cwd": "."}, "moves HEAD off the base"),
+    ("decline", CMD, {"command": ["git", "reset", "--hard", "HEAD~1"], "cwd": "."}, "history rewrite"),
+    ("decline", CMD, {"command": ["git", "-c", "core.hooksPath=x", "commit", "-m", "a"], "cwd": "."},
+     "global -c is declined"),
+    ("decline", CMD, {"command": ["git", "-C", "/elsewhere", "status"], "cwd": "."}, "effective dir outside the lane"),
+    ("decline", CMD, {"command": ["bash", "-lc", "cd src && git push"], "cwd": "."}, "segment after &&"),
+    ("decline", CMD, {"command": ["bash", "-lc", "git status; git stash"], "cwd": "."}, "segment after ;"),
+    ("decline", CMD, {"command": ["sh", "-c", "git commit -m x && git push origin HEAD"], "cwd": "."},
+     "push hidden behind a safe commit"),
 ]
 
 
@@ -82,7 +135,7 @@ ACCEPTANCE_CASES = [
     ("pass", "- ./scripts/gate.sh", "a real markdown bullet still comes off"),
     ("pass", "<ONE runnable, self-contained command.>",
      "an unfilled template must not block a dispatch"),
-    ("block", "C:/proj/venv/Scripts/python.exe -m pytest",
+    ("block", f"{GATE_VENV} -m pytest",
      "the field failure: the main tree's venv, 2 turns, 0 files written"),
     ("block", "npm test > %TEMP%\\out.txt", "location env vars"),
     ("block", "cmd /c type /etc/passwd",
@@ -152,7 +205,7 @@ def check_test_edits(tmp: Path) -> int:
 def main() -> int:
     failures = 0
     for expected, method, params, why in CASES:
-        got, reason = dsp.approval_decision(method, params, LANE)
+        got, reason = dsp.approval_decision(method, params, LANE, is_repo=_stub_is_repo)
         ok = got == expected
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'}  expected {expected:<7} got {got:<7} "
