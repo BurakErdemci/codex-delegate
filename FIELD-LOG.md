@@ -94,6 +94,13 @@ the `git` substring. Direct allowed git calls and quoted git mentions in
 ordinary arguments stay approved. These decisions are tested through the pure
 function on macOS; no live Windows containment measurement is claimed.
 
+The lexical filter is not a security boundary on Windows. An independent review
+of this version still found three ways around it (a script interpreter that
+calls git itself, shell quoting, `eval`), and the class is open-ended: any
+approved interpreter can run git. Treat Windows lanes as unconfined until the
+Codex Windows sandbox is measured to block writes to the main repository's
+`.git`.
+
 Not tested: the Windows junction path (`os.rmdir` of a junction that cannot be
 removed) and the Windows git-policy paths (drive-letter `-C` values,
 `cmd /c git ...`); the acceptance script ran on macOS only. The `.delegate-runs/` exemption is not lexical alone: a
