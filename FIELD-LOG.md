@@ -48,6 +48,33 @@ up, which the author never hit because the author always stood somewhere else.
 
 ---
 
+## v2.14.0
+
+**Every lane in a Python+Node project cost 5-6 hand commands after `open`.**
+Measured in one field session, 6 lanes: symlink `.venv` and
+`frontend/node_modules` into the lane, rewrite `py.sh` (the `--tool` bridge
+called `Path.resolve()`, which follows the venv's `bin/python` symlink to the
+bare base interpreter, so the venv's packages were missing: `No module named
+'fastapi'`), copy probes from an earlier lane while `sed`-rewriting the old
+task id embedded in their tmp paths, hand-write an ACCEPT.py, and delete the
+links by hand before `close` because it blocks on `?? .venv`. Blind-audit
+worktrees were built and removed by hand the same way.
+
+What changed in `new-lane.py`: the bridge keeps the path as given
+(`absolute()`, not `resolve()`); a per-repo `.delegate-lane.toml` (`links`,
+`[tools]`, `[accept] commands`) is applied by `open`; `open --probes-from`
+copies probes with the task id rewritten and `--accept` generates the
+acceptance runner; `close` unlinks the recorded links (the link only, never the
+target) before its dirty check; `blind-open` / `blind-close` do the blind
+worktree in one call each. One measured detour: the link's exclude entry in the
+worktree's own git dir is not read by git (linked worktrees read the shared
+`info/exclude`), so it is written there as a per-lane block and removed again on
+close.
+
+Not tested: the Windows junction path (`mklink /J` on open, `os.rmdir` on
+close) and the `.cmd` bridge inside the generated ACCEPT.py - the acceptance
+script ran on macOS only.
+
 ## v2.13.1
 
 **The skill primed the attack framing it warns against.** `codex-audit` opened

@@ -234,6 +234,34 @@ which is yours, and it will not print a dispatch line until that file exists
 and is not a skeleton: a lane dispatched against an empty spec costs a whole
 turn and returns a worker asking what to do.
 
+### Per-repo lane config
+
+A Python+Node project needed 5-6 hand commands after every `open` (link the
+venv and `node_modules`, point the interpreter bridge at the venv, copy probes,
+write the acceptance runner). Put them in `.delegate-lane.toml` at the main
+repo root; absent means `open` behaves as before.
+
+```toml
+links = [".venv", "frontend/node_modules"]    # linked into the lane, hidden from git status
+[tools]
+py = ".venv/bin/python"                       # same as --tool py=<repo>/.venv/bin/python
+[accept]
+commands = [["py", "-m", "pytest", "-q"]]     # a first element naming a tool runs via its bridge
+```
+
+```bash
+"$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" --base "$BASE_SHA" \
+  --probes-from <old task dir>/probes --accept
+```
+
+`--probes-from` copies earlier probes and rewrites the old task id in them;
+`--accept` writes `.delegate-runs/$TASK_ID/ACCEPT.py` (changelog filled in,
+every probe exits 0, then the `[accept]` commands). `close` removes the links
+itself (never their targets), so it needs no `--force` for them. A blind-audit
+worktree is one call each way: `new-lane.py blind-open --repo . --base "$BASE_SHA"
+--dir <path> [--brief F] [--input F]... [--probes-from DIR]` and
+`new-lane.py blind-close --dir <path>`.
+
 By hand, when you need to see or vary the steps:
 
 ```bash

@@ -17,6 +17,9 @@ still a skeleton, because a dispatched empty spec costs a whole turn.
          recovery) - the architect owns the turn counter, the worker cannot
          know it across a cold start
   close  archive the contract, remove the worktree, drop the trust entry
+  blind-open / blind-close
+         a detached blind-audit worktree with the config links and a verify/
+         dir, and its removal - no task dir, no trust entry
 
 `close` is not optional and not deferrable: 9 stale worktrees, 8 branches and a
 growing trust list were the measured cost of leaving it to memory.
@@ -32,6 +35,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent      # skills/codex-delegate
@@ -258,12 +262,14 @@ def write_tool_bridges(td: Path, specs: list[str]) -> list[str]:
         if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
             raise SystemExit(f"BLOCK: --tool name {name!r} must be letters, digits, "
                              "dot, dash or underscore - it becomes a filename")
-        resolved = Path(target).expanduser()
+        # absolute(), never resolve(): a venv's bin/python is a symlink to the
+        # bare base interpreter, and following it dropped the venv's
+        # site-packages from the bridge (measured: `No module named 'fastapi'`).
+        resolved = Path(target).expanduser().absolute()
         if not resolved.exists():
             # A bridge to a missing executable fails inside the worker's turn,
             # where the error reads as the worker's fault. Fail here instead.
             raise SystemExit(f"BLOCK: --tool {name} points at {resolved}, which does not exist")
-        resolved = resolved.resolve()
 
         # newline="" on both: these literals already carry the endings each
         # file needs, and write_text would translate them again - measured, the
@@ -280,6 +286,278 @@ def write_tool_bridges(td: Path, specs: list[str]) -> list[str]:
         sh_path.chmod(sh_path.stat().st_mode | 0o111)
         written += [str(cmd_path), str(sh_path)]
     return written
+
+
+CONFIG_NAME = ".delegate-lane.toml"
+
+ACCEPT_TEMPLATE = r"""#!/usr/bin/env python3
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+MARKER = __MARKER__
+TOOLS = __TOOLS__
+COMMANDS = __COMMANDS__
+
+task = Path(__file__).resolve().parent
+lane = task.parents[1]
+failures = []
+
+
+def report(name, ok, output=""):
+    print(("ok   " if ok else "FAIL ") + name)
+    tail = [ln for ln in output.splitlines() if ln.strip()][-(20 if not ok else 5):]
+    for ln in tail:
+        print("       " + ln)
+    if not ok:
+        failures.append(name)
+
+
+def bridge(name):
+    path = task / (name + (".cmd" if os.name == "nt" else ".sh"))
+    return str(path) if path.is_file() else None
+
+
+def run(argv, env=None):
+    try:
+        r = subprocess.run(argv, cwd=lane, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=900)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 1, f"{type(exc).__name__}: {exc}"
+    return r.returncode, r.stdout + r.stderr
+
+
+turns = [(int(m.group(1)), p) for p in task.glob("turn-*.md")
+         if (m := re.fullmatch(r"turn-(\d+)\.md", p.name))]
+if not turns:
+    report("changelog turn-N.md exists", False, f"no turn-N.md in {task}")
+    sys.exit(1)
+number, changelog = max(turns)
+body = changelog.read_text(encoding="utf-8", errors="replace")
+if not body.strip() or MARKER in body:
+    report(f"changelog {changelog.name} is filled in", False,
+           "missing, empty, or still the seeded skeleton")
+    sys.exit(1)
+report(f"changelog {changelog.name} is filled in", True)
+
+env = dict(os.environ, AUDIT_ROOT=str(lane))
+probes = task / "probes"
+py = bridge("py")
+for probe in sorted(probes.iterdir()) if probes.is_dir() else []:
+    if probe.suffix == ".py":
+        argv = [py or sys.executable, str(probe)]
+    elif probe.suffix in (".cjs", ".js"):
+        argv = ["node", str(probe)]
+    else:
+        continue
+    rc, out = run(argv, env=env)
+    report(f"probe {probe.name}", rc == 0, out)
+
+for argv in COMMANDS:
+    argv = list(argv)
+    if argv and argv[0] in TOOLS and bridge(argv[0]):
+        argv[0] = bridge(argv[0])
+    rc, out = run(argv)
+    report("command " + " ".join(argv), rc == 0, out)
+
+if failures:
+    print(f"FAILED: {len(failures)}")
+    sys.exit(1)
+print("ACCEPT ALL OK")
+"""
+
+
+def load_config(repo: Path) -> dict:
+    """The per-repo lane config, validated; an absent file changes nothing.
+
+    Measured in a six-lane field session: every lane in a Python+Node project
+    took 5-6 hand commands after `open` (link the venv and node_modules, point
+    the interpreter bridge at the venv, copy probes, write the acceptance
+    runner). They are the same commands each time, so they live in the repo.
+    """
+    path = repo / CONFIG_NAME
+    cfg = {"links": [], "tools": {}, "commands": []}
+    if not path.is_file():
+        return cfg
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"BLOCK: cannot read {path}: {exc}")
+    links = raw.get("links", [])
+    if not isinstance(links, list) or not all(isinstance(x, str) and x for x in links):
+        raise SystemExit(f"BLOCK: {path}: links must be a list of repo-relative path strings")
+    for rel in links:
+        parts = Path(rel).parts
+        if Path(rel).is_absolute() or ".." in parts or not parts:
+            raise SystemExit(f"BLOCK: {path}: link {rel!r} must be a path inside the repo")
+    tools = raw.get("tools", {})
+    if not isinstance(tools, dict) or not all(isinstance(v, str) and v for v in tools.values()):
+        raise SystemExit(f"BLOCK: {path}: [tools] must map NAME to a repo-relative path string")
+    accept = raw.get("accept", {})
+    commands = accept.get("commands", []) if isinstance(accept, dict) else None
+    if (commands is None or not isinstance(commands, list)
+            or not all(isinstance(c, list) and c and all(isinstance(a, str) for a in c)
+                       for c in commands)):
+        raise SystemExit(f"BLOCK: {path}: [accept] commands must be a list of argv lists")
+    cfg.update(links=links, tools=tools, commands=commands)
+    return cfg
+
+
+def merged_tools(repo: Path, cfg: dict, cli: list[str]) -> list[str]:
+    """Config tools as NAME=<repo>/<path> specs; a --tool of the same name wins."""
+    named = {spec.partition("=")[0].strip() for spec in cli}
+    from_cfg = [f"{name}={repo / rel}" for name, rel in cfg["tools"].items()
+                if name not in named]
+    return from_cfg + list(cli)
+
+
+def is_junction(path: Path) -> bool:
+    return os.name == "nt" and path.is_dir() and not path.is_symlink() and bool(
+        getattr(os.path, "isjunction", lambda p: False)(path))
+
+
+def make_link(source: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt" and source.is_dir():
+        # A directory symlink needs a privilege most Windows accounts lack; a
+        # junction does not, and for a venv or node_modules it is equivalent.
+        out = subprocess.run(["cmd", "/c", "mklink", "/J", str(dest), str(source)],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if out.returncode != 0:
+            raise SystemExit(f"BLOCK: mklink /J {dest} -> {source} failed: "
+                             f"{(out.stdout + out.stderr).strip()}")
+    else:
+        os.symlink(source, dest, target_is_directory=source.is_dir())
+
+
+def exclude_file(lane: Path) -> Path | None:
+    """The exclude file git actually reads for this worktree.
+
+    Measured: an entry written to the worktree's own git dir (`rev-parse
+    --git-dir`/info/exclude) is ignored by git - linked worktrees read the
+    SHARED `info/exclude`, and `?? .venv` stayed in `git status`. So the entry
+    goes in the shared file, wrapped in a block keyed by the lane path that
+    close removes again; two lanes linking the same path each own a copy.
+    """
+    out = git(["rev-parse", "--git-path", "info/exclude"], cwd=lane, check=False)
+    if not out:
+        return None
+    path = Path(out)
+    return path if path.is_absolute() else lane / path
+
+
+def drop_exclude_block(lane: Path) -> None:
+    path = exclude_file(lane)
+    if path is None or not path.is_file():
+        return
+    begin, end = f"# delegate-lane begin {lane}", f"# delegate-lane end {lane}"
+    kept, skipping = [], False
+    for line in path.read_text(encoding="utf-8").splitlines(keepends=True):
+        if line.rstrip("\r\n") == begin:
+            skipping = True
+        elif skipping and line.rstrip("\r\n") == end:
+            skipping = False
+        elif not skipping:
+            kept.append(line)
+    path.write_text("".join(kept), encoding="utf-8", newline="")
+
+
+def link_into(repo: Path, lane: Path, rels: list[str]) -> list[str]:
+    """Link each repo-relative path into the lane and hide it from `git status`.
+
+    Entries are anchored and carry no trailing slash - `.venv/` in a
+    .gitignore does not match a symlink.
+    """
+    made: list[str] = []
+    try:
+        for rel in rels:
+            source = repo / rel
+            if not source.exists():
+                raise SystemExit(f"BLOCK: {CONFIG_NAME} links {rel!r}, which does not exist in {repo}")
+            dest = lane / rel
+            if os.path.lexists(dest):
+                raise SystemExit(f"BLOCK: cannot link {rel!r}: {dest} already exists in the lane")
+            make_link(source, dest)
+            made.append(rel)
+        exclude = exclude_file(lane) if made else None
+        if exclude is not None:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            with exclude.open("a", encoding="utf-8", newline="") as fh:
+                fh.write(f"# delegate-lane begin {lane}\n"
+                         + "".join(f"/{rel}\n" for rel in made)
+                         + f"# delegate-lane end {lane}\n")
+    except BaseException:
+        unlink_links(lane, made)
+        raise
+    return made
+
+
+def unlink_links(lane: Path, rels: list[str]) -> None:
+    """Remove the links themselves - never anything behind them.
+
+    `git worktree remove --force` and rmtree both risk walking through a
+    Windows junction into the real venv, so links go first, one object each:
+    os.unlink for a symlink, os.rmdir for a junction (which refuses a real
+    non-empty directory).
+    """
+    drop_exclude_block(lane)
+    for rel in rels:
+        dest = lane / rel
+        try:
+            if dest.is_symlink():
+                os.unlink(dest)
+            elif is_junction(dest):
+                os.rmdir(dest)
+            elif os.path.lexists(dest):
+                print(f"WARNING: {dest} is not a link, left alone", file=sys.stderr)
+        except OSError as exc:
+            print(f"WARNING: could not remove link {dest}: {exc}", file=sys.stderr)
+
+
+def verify_sources(repo: Path, rels: list[str]) -> None:
+    for rel in rels:
+        if not (repo / rel).exists():
+            print(f"ERROR: {repo / rel} no longer exists after removing its lane link - "
+                  "a link removal went through to the target; restore it NOW", file=sys.stderr)
+
+
+def copy_probes(src: Path, dest: Path, new_id: str) -> list[str]:
+    """Copy a lane's probes, retargeting the task id embedded in their tmp paths."""
+    src = Path(src)
+    if not src.is_dir():
+        raise SystemExit(f"BLOCK: --probes-from {src} is not a directory")
+    old_id = None
+    try:
+        record = json.loads((src.parent / "lane.json").read_text(encoding="utf-8"))
+        old_id = record.get("task_id") if isinstance(record, dict) else None
+    except (OSError, ValueError):
+        old_id = None
+    dest.mkdir(parents=True, exist_ok=True)
+    copied = []
+    for f in sorted(src.iterdir()):
+        if not f.is_file():
+            continue
+        data = f.read_bytes()
+        if isinstance(old_id, str) and old_id:
+            try:
+                data = data.decode("utf-8").replace(old_id, new_id).encode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        (dest / f.name).write_bytes(data)
+        copied.append(str(dest / f.name))
+    return copied
+
+
+def write_accept(td: Path, cfg: dict, tool_names: list[str]) -> str:
+    text = (ACCEPT_TEMPLATE.replace("__MARKER__", json.dumps(SKELETON_MARKER))
+            .replace("__TOOLS__", json.dumps(tool_names))
+            .replace("__COMMANDS__", json.dumps(cfg["commands"])))
+    path = td / "ACCEPT.py"
+    path.write_text(text, encoding="utf-8", newline="")
+    return str(path)
 
 
 def cmd_open(args: argparse.Namespace) -> int:
@@ -299,6 +577,9 @@ def cmd_open(args: argparse.Namespace) -> int:
     if lane.exists():
         raise SystemExit(f"BLOCK: {lane} already exists - close it first, or pass --lane")
 
+    cfg = load_config(repo)
+    tool_specs = merged_tools(repo, cfg, args.tool)
+    links: list[str] = []
     git(["worktree", "add", "--detach", str(lane), base], cwd=repo)
     try:
         # Verify rather than assume: a worktree branched from a stale base is
@@ -324,15 +605,25 @@ def cmd_open(args: argparse.Namespace) -> int:
         if args.spec:
             shutil.copyfile(args.spec, td / "SPEC.md")
             created.append(str(td / "SPEC.md"))
-        if args.tool:
-            created += write_tool_bridges(td, args.tool)
+        if tool_specs:
+            created += write_tool_bridges(td, tool_specs)
+        links = link_into(repo, lane, cfg["links"])
+        created += [str(lane / rel) for rel in links]
+        if args.probes_from:
+            (td / "probes").mkdir(exist_ok=True)
+            created += copy_probes(args.probes_from, td / "probes", args.task_id)
+        (td / "tmp").mkdir(exist_ok=True)
+        created.append(str(td / "tmp"))
+        if args.accept:
+            names = [spec.partition("=")[0].strip() for spec in tool_specs]
+            created.append(write_accept(td, cfg, names))
 
         # Written before the seeding so `turn` can find it even if the run dies
         # halfway: it is what stops a later turn from rebuilding an audit
         # PROMPT.txt as a worker one.
         (td / "lane.json").write_text(
-            json.dumps({"task_id": args.task_id, "mode": args.mode, "base_sha": base},
-                       indent=2), encoding="utf-8")
+            json.dumps({"task_id": args.task_id, "mode": args.mode, "base_sha": base,
+                        "links": links}, indent=2), encoding="utf-8")
         created.append(str(td / "lane.json"))
 
         created += seed_turn(lane, args.task_id, args.turn, args.mode, recovery=False)
@@ -349,6 +640,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         # Anything from here on leaves a registered worktree behind, and the
         # next attempt then dies on "already exists" with a half-seeded task
         # dir inside it. The step that creates owns the step that removes.
+        unlink_links(lane, links)
         git(["worktree", "remove", "--force", str(lane)], cwd=repo, check=False)
         git(["worktree", "prune"], cwd=repo, check=False)
         # Verify the rollback instead of announcing it. `check=False` means the
@@ -516,6 +808,20 @@ def cmd_close(args: argparse.Namespace) -> int:
                 "them (git -C <main> cherry-pick, or apply the diff), or pass --force "
                 "to discard them.")
 
+    # Links first: they would show as untracked, and a removal that walks
+    # through one would reach the real venv. Unlink only the link itself.
+    link_rels = None
+    try:
+        record = json.loads((td / "lane.json").read_text(encoding="utf-8"))
+        if isinstance(record, dict) and isinstance(record.get("links"), list):
+            link_rels = [x for x in record["links"] if isinstance(x, str)]
+    except (OSError, ValueError):
+        link_rels = None
+    if link_rels is None:
+        link_rels = load_config(repo)["links"]
+    unlink_links(lane, link_rels)
+    verify_sources(repo, link_rels)
+
     dirty = git(["status", "--porcelain", "-uall", "--", ".", ":(exclude).delegate-runs"],
                 cwd=lane, check=False)
     if dirty and not args.force:
@@ -602,6 +908,70 @@ def cmd_close(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_blind_open(args: argparse.Namespace) -> int:
+    repo = repo_root(args.repo)
+    if is_linked_worktree(repo):
+        raise SystemExit(f"BLOCK: {repo} is itself a lane - open blind worktrees from the main tree")
+    base = git(["rev-parse", args.base], cwd=repo)
+    wt = Path(args.dir).resolve()
+    if wt.exists():
+        raise SystemExit(f"BLOCK: {wt} already exists - remove it first, or pick another --dir")
+    for f in [args.brief, *args.input]:
+        if f is not None and not Path(f).is_file():
+            raise SystemExit(f"BLOCK: {f} is not a file")
+    cfg = load_config(repo)
+    links: list[str] = []
+    git(["worktree", "add", "--detach", str(wt), base], cwd=repo)
+    try:
+        head = git(["rev-parse", "HEAD"], cwd=wt)
+        if head != base:
+            raise SystemExit(f"BLOCK: blind worktree HEAD {head} != requested base {base}")
+        links = link_into(repo, wt, cfg["links"])
+        verify = wt / "verify"
+        verify.mkdir()
+        if args.brief:
+            shutil.copyfile(args.brief, verify / "SPEC.md")
+        for f in args.input:
+            shutil.copyfile(f, verify / Path(f).name)
+        if args.probes_from:
+            copy_probes(args.probes_from, verify / "prior-probes", "blind")
+        (verify / ".blind.json").write_text(
+            json.dumps({"base_sha": base, "links": links}, indent=2), encoding="utf-8")
+    except BaseException:
+        unlink_links(wt, links)
+        git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
+        git(["worktree", "prune"], cwd=repo, check=False)
+        if wt.exists() or registered_worktree(repo, wt):
+            print(f"ROLLBACK INCOMPLETE: {wt} is still there - remove it by hand "
+                  f"(git -C {repo} worktree remove --force {wt})", file=sys.stderr)
+        else:
+            print(f"rolled back: removed the half-built blind worktree at {wt}", file=sys.stderr)
+        raise
+    print(wt)
+    return 0
+
+
+def cmd_blind_close(args: argparse.Namespace) -> int:
+    wt = Path(args.dir).resolve()
+    if not (wt / ".git").exists():
+        raise SystemExit(f"BLOCK: {wt} is not a git worktree - check --dir")
+    record_path = wt / "verify" / ".blind.json"
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        rels = [x for x in record.get("links", []) if isinstance(x, str)]
+    except (OSError, ValueError, AttributeError):
+        raise SystemExit(f"BLOCK: cannot read {record_path} - this is not a blind worktree "
+                         "made by blind-open, so its links are unknown. Remove it by hand.")
+    main = main_repo_of(wt)
+    unlink_links(wt, rels)
+    verify_sources(main, rels)
+    git(["worktree", "remove", "--force", str(wt)], cwd=main)
+    git(["worktree", "prune"], cwd=main)
+    verify_sources(main, rels)
+    print(f"removed blind worktree {wt}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -620,6 +990,12 @@ def main() -> int:
                          "acceptance command can call. Repeatable. Without this, an "
                          "acceptance command naming the path directly is declined by "
                          "the sandbox and the turn produces nothing.")
+    op.add_argument("--probes-from", type=Path, default=None, metavar="DIR",
+                    help="copy every file in DIR into the new probes/, rewriting the old "
+                         "task id (from DIR/../lane.json) to this one")
+    op.add_argument("--accept", action="store_true",
+                    help="write <task dir>/ACCEPT.py: changelog check, probes, and the "
+                         f"[accept] commands from {CONFIG_NAME}")
     op.add_argument("--turn", type=int, default=1)
     op.add_argument("--no-trust", action="store_true",
                     help="skip doctor.py --trust (the worker will not run without it)")
@@ -646,6 +1022,21 @@ def main() -> int:
     cp.add_argument("--no-untrust", action="store_true",
                     help="leave the worker config alone (for lanes opened with --no-trust)")
     cp.set_defaults(func=cmd_close)
+
+    bo = sub.add_parser("blind-open", help="detached blind-audit worktree with links and verify/")
+    bo.add_argument("--repo", type=Path, default=Path.cwd())
+    bo.add_argument("--base", required=True, help="commit-ish the worktree is pinned to")
+    bo.add_argument("--dir", type=Path, required=True, help="worktree path")
+    bo.add_argument("--brief", type=Path, default=None, help="copied to verify/SPEC.md")
+    bo.add_argument("--input", type=Path, action="append", default=[], metavar="FILE",
+                    help="copied into verify/ under its own name. Repeatable.")
+    bo.add_argument("--probes-from", type=Path, default=None, metavar="DIR",
+                    help="copy DIR's files to verify/prior-probes/ (task id rewritten to 'blind')")
+    bo.set_defaults(func=cmd_blind_open)
+
+    bc = sub.add_parser("blind-close", help="remove a blind worktree and its links")
+    bc.add_argument("--dir", type=Path, required=True)
+    bc.set_defaults(func=cmd_blind_close)
 
     args = ap.parse_args()
     return args.func(args)
