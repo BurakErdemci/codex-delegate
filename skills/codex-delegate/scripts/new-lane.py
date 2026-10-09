@@ -394,8 +394,24 @@ def load_config(repo: Path) -> dict:
         if Path(rel).is_absolute() or ".." in parts or not parts:
             raise SystemExit(f"BLOCK: {path}: link {rel!r} must be a path inside the repo")
     tools = raw.get("tools", {})
-    if not isinstance(tools, dict) or not all(isinstance(v, str) and v for v in tools.values()):
+    # A venv interpreter lives at Scripts/python.exe on Windows and bin/python
+    # elsewhere, and the same config is shared by both machines through git,
+    # so a tool may name one path per platform.
+    platform = "windows" if os.name == "nt" else "posix"
+    if not isinstance(tools, dict):
         raise SystemExit(f"BLOCK: {path}: [tools] must map NAME to a repo-relative path string")
+    resolved = {}
+    for name, value in tools.items():
+        if isinstance(value, dict) and value and set(value) <= {"windows", "posix"} and all(
+                isinstance(v, str) and v for v in value.values()):
+            value = value.get(platform)
+            if value is None:
+                continue
+        elif not (isinstance(value, str) and value):
+            raise SystemExit(f"BLOCK: {path}: [tools] {name} must be a repo-relative path string "
+                             "or a table with `windows` and/or `posix` path strings")
+        resolved[name] = value
+    tools = resolved
     accept = raw.get("accept", {})
     commands = accept.get("commands", []) if isinstance(accept, dict) else None
     if (commands is None or not isinstance(commands, list)

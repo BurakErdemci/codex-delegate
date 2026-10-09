@@ -248,6 +248,8 @@ repo root; absent means `open` behaves as before.
 links = [".venv", "frontend/node_modules"]    # linked into the lane, hidden from git status
 [tools]
 py = ".venv/bin/python"                       # same as --tool py=<repo>/.venv/bin/python
+# per platform, for a config shared by Windows and macOS:
+# py = { windows = ".venv/Scripts/python.exe", posix = ".venv/bin/python" }
 [accept]
 commands = [["py", "-m", "pytest", "-q"]]     # a first element naming a tool runs via its bridge
 ```
