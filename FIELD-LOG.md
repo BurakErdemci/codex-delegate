@@ -77,6 +77,23 @@ integrate recorded; `close` and `blind-close` block before any worktree removal
 while a recorded link is still there; `link_into` refuses a source whose real
 path is outside the repo; `test_approvals.py` fixtures are platform-aware.
 
+Follow-up measured by the architect on macOS with the workspace sandbox:
+`branch`, `branch -f main`, `tag`, `stash` and `config`, including `env git`
+and path-qualified git, failed with "Operation not permitted" when writing
+the main repo's shared `.git`; the main repo was unchanged. `add` and `commit`
+failed too because the lane's index is in that shared directory. Git reads
+and in-lane file writes worked, and a repo created under the task dir's `tmp/`
+allowed `init`, `add`, `commit`, `branch` and `worktree`. The contract now says
+to leave lane changes uncommitted on macOS and never retry a sandbox denial
+another way. POSIX approval requests are blanket-declined before the pure
+filter; Windows has no OS sandbox here and relies on that filter. The lexical
+filter now declines indirect git tokens through wrappers such as `env`,
+`command`, `exec`, `nice`, `xargs`, `sudo` and `time`, leading Git repository
+or configuration environment assignments, and command substitution containing
+the `git` substring. Direct allowed git calls and quoted git mentions in
+ordinary arguments stay approved. These decisions are tested through the pure
+function on macOS; no live Windows containment measurement is claimed.
+
 Not tested: the Windows junction path (`os.rmdir` of a junction that cannot be
 removed) and the Windows git-policy paths (drive-letter `-C` values,
 `cmd /c git ...`); the acceptance script ran on macOS only. The `.delegate-runs/` exemption is not lexical alone: a

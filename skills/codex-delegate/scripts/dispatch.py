@@ -397,6 +397,11 @@ _GIT_LANE_SAFE = frozenset({"status", "diff", "log", "show", "rev-parse", "ls-fi
                             "add", "commit"})
 _SHELL_PROGRAMS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "cmd", "powershell", "pwsh"})
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[;&|\n]")
+_SHELL_TOKEN = re.compile(r"""(?:[^\s;&|'\"]+|'[^']*'|\"[^\"]*\")+|&&|\|\||[;&|\n]""")
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_GIT_ENV = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+                      "GIT_OBJECT_DIRECTORY"})
+_GIT_WRAPPERS = frozenset({"env", "command", "exec", "nice", "xargs", "sudo", "time"})
 
 
 def _program_name(token: str) -> str:
@@ -404,29 +409,29 @@ def _program_name(token: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
-def _git_invocations(command: str | list) -> list[list[str]]:
-    """Every git invocation (argv, program first) found in the command.
+def _git_segments(command: str | list) -> list[list[str]]:
+    """Direct argv or shell segments, retaining quoted arguments as tokens.
 
-    A direct argv is one invocation when argv[0] is git. Through a shell the
-    remaining text is cut at &&, ||, ;, & and | - over-splitting is the safe
-    direction, it can only turn a quoted separator into an extra segment.
+    Quoted separators belong to an argument: splitting `echo 'git; git'`
+    would invent a git invocation that the shell never executes.
     """
-    if isinstance(command, list) and command and _program_name(str(command[0])) == "git":
-        return [[str(t) for t in command]]
     if isinstance(command, list):
         if not command or _program_name(str(command[0])) not in _SHELL_PROGRAMS:
-            return []
-        text = " ".join(str(t) for t in command[1:])
+            return [[str(t) for t in command]] if command else []
+        args = [str(t) for t in command[1:]]
+        while args and (args[0].startswith("-") or args[0].lower() in ("/c", "/k")
+                        or args[0].lower().startswith("/v:")):
+            args.pop(0)
+        text = " ".join(args)
     else:
         text = command
-    found: list[list[str]] = []
-    for segment in _SEGMENT_SPLIT.split(text):
-        tokens = [t.strip("'\"") for t in segment.split()]
-        while tokens and (tokens[0].startswith(("-", "/")) or "=" in tokens[0]):
-            tokens.pop(0)
-        if tokens and _program_name(tokens[0]) == "git":
-            found.append(tokens)
-    return found
+    segments: list[list[str]] = [[]]
+    for token in _SHELL_TOKEN.findall(text):
+        if _SEGMENT_SPLIT.fullmatch(token):
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    return [segment for segment in segments if segment]
 
 
 def _real_is_repo(path: Path) -> bool:
@@ -455,7 +460,31 @@ def _git_verdict(command: str | list, lane_root: Path, cwd_abs: str,
                  is_repo=_real_is_repo) -> str | None:
     """Reason to decline the git invocations in this command, or None."""
     runs_dir = lane_root / ".delegate-runs"
-    for argv in _git_invocations(command):
+    text = command if isinstance(command, str) else (
+        " ".join(str(t) for t in command[1:])
+        if command and _program_name(str(command[0])) in _SHELL_PROGRAMS else "")
+    if "git" in text.lower() and ("$(" in text or "`" in text):
+        form = "$(...)" if "$(" in text else "backtick"
+        return f"git with {form} command substitution is declined (not lexically scoped)"
+    for segment in _git_segments(command):
+        first = 0
+        while first < len(segment) and _ENV_ASSIGNMENT.match(segment[first]):
+            name = segment[first].split("=", 1)[0]
+            if name in _GIT_ENV or name.startswith("GIT_CONFIG"):
+                return f"git environment assignment {name} is declined (can redirect repository state)"
+            first += 1
+        if first == len(segment):
+            continue
+        program = _program_name(segment[first])
+        for token in segment[first + 1:]:
+            quoted = len(token) >= 2 and token[0] in "'\"" and token[-1] == token[0]
+            # Wrappers execute the quoted name; ordinary quoted arguments
+            # merely mentioning git must not become invented invocations.
+            if _program_name(token) == "git" and (not quoted or program in _GIT_WRAPPERS):
+                return f"indirect git through {segment[first]!r} is declined"
+        if program != "git":
+            continue
+        argv = [token.strip("'\"") for token in segment[first:]]
         effective = cwd_abs
         i = 1
         while i < len(argv) and argv[i].startswith("-"):

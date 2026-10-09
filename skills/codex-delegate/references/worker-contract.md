@@ -32,6 +32,11 @@ SPEC.md first - do not rely on your memory of it.
    clean, rebase, merge, cherry-pick. Why: this worktree shares refs, stash
    and config with the main repo, so those commands change the main repo, not
    just your lane; a commit on your detached HEAD moves only your own HEAD.
+   On macOS the sandbox blocks writes to the shared `.git`, including the
+   lane's index, so `git add` and `git commit` in the lane fail there. Leave
+   changes uncommitted; the architect integrates them. Never retry a sandbox
+   denial another way. Repos you create under the task dir's `tmp/` are fully
+   usable within the non-network rule above.
 2. Never act outside the working tree: no remote hosts, no deployments, no
    package publishing, no code hosting services.
 3. Never write outside the FILE WHITELIST. If the goal seems to require an
