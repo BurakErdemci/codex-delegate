@@ -33,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -126,16 +127,157 @@ def registered_worktree(repo: Path, lane: Path) -> bool:
                for line in listing.splitlines())
 
 
-def prune_only(repo: Path, lane: Path, no_untrust: bool) -> int:
-    """Clear the registration and trust entry of a lane whose directory is gone."""
+def live_worktree(path: Path) -> bool:
+    """Does git still serve this directory as its own worktree?
+
+    False for the debris of a half-failed `git worktree remove`: measured,
+    a "Permission denied" (a shell or hung process with its cwd inside the
+    lane) unregistered the worktree and left part of the directory, and
+    every later close stopped at "not a git worktree".
+    """
+    if not (path / ".git").exists():
+        return False
+    out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(path),
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return out.returncode == 0 and Path(out.stdout.strip()).resolve() == path
+
+
+def lanes_root(repo: Path) -> Path:
+    return (repo.parent / f"{repo.name}-lanes").resolve()
+
+
+def leftover_repo(path: Path, given: Path | None) -> Path:
+    """The main repo of a lane git no longer knows: --repo, else <repo>-lanes/<name>."""
+    if given is None:
+        parent = path.parent
+        if not parent.name.endswith("-lanes"):
+            raise SystemExit(f"BLOCK: {path} is not a live git worktree and is not under a "
+                             "<repo>-lanes directory - pass --repo")
+        given = parent.parent / parent.name[:-len("-lanes")]
+        if not (given / ".git").exists():
+            raise SystemExit(f"BLOCK: {path} is not a live git worktree and {given} is not a "
+                             "git repo - pass --repo")
+    repo = repo_root(Path(given).resolve())
+    if is_linked_worktree(repo):
+        raise SystemExit(f"BLOCK: {repo} is itself a lane - pass the main repo as --repo")
+    return repo
+
+
+def _is_link(path: Path) -> bool:
+    return path.is_symlink() or getattr(os.lstat(path), "st_reparse_tag", 0) == getattr(
+        stat, "IO_REPARSE_TAG_MOUNT_POINT", -1)
+
+
+def remove_tree(root: Path) -> list[str]:
+    """Delete a directory without ever following a link out of it.
+
+    The lane's links are junctions into the main repo (venv, node_modules),
+    and a leftover may still hold them, so a link is removed as one object
+    and never descended into. Returns "path: reason" for what stayed.
+    """
+    failures: list[str] = []
+
+    def remove(path: Path) -> bool:
+        try:
+            if _is_link(path):
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    os.unlink(path)
+                return True
+            if path.is_dir():
+                ok = all([remove(child) for child in path.iterdir()])
+                if ok:
+                    os.rmdir(path)
+                return ok
+            try:
+                os.unlink(path)
+            except PermissionError:
+                os.chmod(path, stat.S_IWRITE)
+                os.unlink(path)
+            return True
+        except OSError as exc:
+            failures.append(f"{path}: {exc.strerror or exc}")
+            return False
+
+    remove(root)
+    return failures
+
+
+def clear_leftover(repo: Path, path: Path) -> int:
+    """Delete what is left of a lane directory, then prune git's registration."""
+    if os.path.lexists(path):
+        failures = remove_tree(path)
+        if failures:
+            print(f"BLOCK: could not delete {len(failures)} path(s) under {path}; something "
+                  "still holds them:")
+            for line in failures[:10]:
+                print(f"  ! {line}")
+            print(f"Look for a process whose command line or working directory contains {path} "
+                  "(PowerShell: Get-CimInstance Win32_Process | Where-Object CommandLine -like "
+                  f"'*{path.name}*' | Select-Object ProcessId,Name,CommandLine), stop it or move "
+                  "that shell out, then run this close again - it continues from here.")
+            return 1
+        print(f"deleted the leftover directory {path}")
     git(["worktree", "prune"], cwd=repo, check=False)
-    print(f"pruned the registration for {lane} (its directory was already gone - "
-          "nothing could be archived, and any commit it held is already unreferenced)")
-    if not no_untrust:
-        subprocess.run([sys.executable, str(DOCTOR), "--untrust", str(lane)],
-                       capture_output=True, text=True, encoding="utf-8", errors="replace")
-        print("dropped its trust entry")
+    if registered_worktree(repo, path):
+        print(f"BLOCK: git still lists {path} as a worktree after prune - "
+              f"check `git -C {repo} worktree list`")
+        return 1
+    print(f"pruned the worktree registration for {path}")
     return 0
+
+
+def close_leftover(path: Path, given: Path | None, task_id: str | None,
+                   no_untrust: bool) -> int:
+    """Finish closing a lane (task_id set) or blind worktree that git no longer serves.
+
+    Deletes only a directory directly under this repo's lanes root whose name
+    is that lane's - anything else is left alone, whatever state it is in.
+    """
+    repo = leftover_repo(path, given)
+    if os.path.lexists(path):
+        if task_id is not None:
+            former = path.name.casefold() == task_id.casefold()
+        else:
+            former = path.name.endswith("-blind") or (path / "verify" / ".blind.json").is_file()
+        if path.parent != lanes_root(repo) or not former:
+            raise SystemExit(f"BLOCK: {path} is not a live git worktree, and it is not a former "
+                             f"{'lane ' + task_id if task_id else 'blind worktree'} directly under "
+                             f"{lanes_root(repo)} - left alone; remove it by hand if it is debris")
+        td = task_dir(path, task_id) if task_id else None
+        archive = repo / ".delegate-runs" / "ARCHIVE" / task_id if task_id else None
+        if td is not None and td.is_dir():
+            if archive.exists():
+                print(f"run directory already archived at {archive} - not copied again")
+            else:
+                try:
+                    shutil.copytree(td, archive, symlinks=True)
+                except (OSError, shutil.Error) as exc:
+                    raise SystemExit(f"BLOCK: archiving the leftover run directory {td} failed, "
+                                     f"so nothing was deleted: {exc}")
+                print(f"archived the leftover run directory -> {archive}")
+    elif registered_worktree(repo, path):
+        print(f"{path} is already gone - nothing could be archived, and any commit it held "
+              "is already unreferenced")
+    else:
+        print(f"{path} is gone and git does not list it - nothing to remove")
+    if clear_leftover(repo, path):
+        return 1
+    verify_sources(repo, load_config(repo)["links"])
+    if task_id is not None and not no_untrust:
+        untrust(path)
+    return 0
+
+
+def untrust(lane: Path) -> None:
+    out = subprocess.run([sys.executable, str(DOCTOR), "--untrust", str(lane)],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    print(out.stdout.strip() or out.stderr.strip())
+    if out.returncode != 0:
+        # Not fatal - the worktree is already gone - but say it, because trust
+        # entries accumulate invisibly and nothing else will mention it again.
+        print(f"WARNING: trust entry for {lane} was not removed (rc={out.returncode})")
 
 
 def task_dir(lane: Path, task_id: str) -> Path:
@@ -825,16 +967,11 @@ def print_next_steps(lane: Path, task_id: str, turn: int) -> None:
 
 def cmd_close(args: argparse.Namespace) -> int:
     lane = Path(args.lane).resolve()
-    if not (lane / ".git").exists():
-        if args.repo and registered_worktree(Path(args.repo).resolve(), lane):
-            # The directory was deleted by hand but git still lists it, and the
-            # trust entry still exists. Refusing here left exactly the debris
-            # this script was written to prevent, with no way to clear it.
-            return prune_only(Path(args.repo).resolve(), lane, args.no_untrust)
-        raise SystemExit(
-            f"BLOCK: {lane} is not a git worktree - check --lane "
-            "(if the directory was deleted by hand, pass --repo so the "
-            "registration and trust entry can still be cleaned up)")
+    if not live_worktree(lane):
+        # Deleted by hand, or half-removed by an earlier close: either way the
+        # registration, the leftover files and the trust entry still need
+        # clearing, and refusing here left that debris with no way out.
+        return close_leftover(lane, args.repo, args.task_id, args.no_untrust)
     main = main_repo_of(lane)
     repo = Path(args.repo).resolve() if args.repo else main
     if repo != main:
@@ -982,19 +1119,23 @@ def cmd_close(args: argparse.Namespace) -> int:
         print(f"  + {name}")
     print(f"  verified {len(copied)} file(s) by sha256 -> MANIFEST.sha256")
 
-    git(["worktree", "remove", "--force", str(lane)], cwd=repo)
-    git(["worktree", "prune"], cwd=repo)
-    print(f"removed worktree {lane}")
-    if args.no_untrust:
-        return 0
-    out = subprocess.run([sys.executable, str(DOCTOR), "--untrust", str(lane)],
-                         capture_output=True, text=True, encoding="utf-8", errors="replace")
-    print(out.stdout.strip() or out.stderr.strip())
-    if out.returncode != 0:
-        # Not fatal - the worktree is already gone - but say it, because trust
-        # entries accumulate invisibly and nothing else will mention it again.
-        print(f"WARNING: trust entry for {lane} was not removed (rc={out.returncode})")
+    if remove_worktree(repo, lane):
+        return 1
+    if not args.no_untrust:
+        untrust(lane)
     return 0
+
+
+def remove_worktree(repo: Path, path: Path) -> int:
+    """`git worktree remove --force`, finishing by hand what it leaves behind."""
+    out = subprocess.run(["git", "worktree", "remove", "--force", str(path)], cwd=str(repo),
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if out.returncode == 0:
+        git(["worktree", "prune"], cwd=repo)
+        print(f"removed worktree {path}")
+        return 0
+    print(f"WARNING: git worktree remove failed: {out.stderr.strip()[:500]}")
+    return clear_leftover(repo, path)
 
 
 def cmd_integrate(args: argparse.Namespace) -> int:
@@ -1124,8 +1265,8 @@ def cmd_blind_open(args: argparse.Namespace) -> int:
 
 def cmd_blind_close(args: argparse.Namespace) -> int:
     wt = Path(args.dir).resolve()
-    if not (wt / ".git").exists():
-        raise SystemExit(f"BLOCK: {wt} is not a git worktree - check --dir")
+    if not live_worktree(wt):
+        return close_leftover(wt, args.repo, None, True)
     record_path = wt / "verify" / ".blind.json"
     try:
         record = json.loads(record_path.read_text(encoding="utf-8"))
@@ -1139,14 +1280,18 @@ def cmd_blind_close(args: argparse.Namespace) -> int:
     left = remaining_links(wt, rels)
     if left:
         return link_block(wt, left)
-    git(["worktree", "remove", "--force", str(wt)], cwd=main)
-    git(["worktree", "prune"], cwd=main)
+    if remove_worktree(main, wt):
+        return 1
     verify_sources(main, rels)
-    print(f"removed blind worktree {wt}")
     return 0
 
 
 def main() -> int:
+    # Windows reports OS errors in the user's language; measured, a Turkish
+    # "Permission denied" crashed close mid-report on a cp1252 pipe.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -1215,6 +1360,9 @@ def main() -> int:
 
     bc = sub.add_parser("blind-close", help="remove a blind worktree and its links")
     bc.add_argument("--dir", type=Path, required=True)
+    bc.add_argument("--repo", type=Path, default=None,
+                    help="main repo, only needed when --dir is debris git no longer lists "
+                         "and is not under <repo>-lanes")
     bc.set_defaults(func=cmd_blind_close)
 
     args = ap.parse_args()

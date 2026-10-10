@@ -265,7 +265,12 @@ every probe exits 0, then the `[accept]` commands). `close` removes the links
 itself (never their targets), so it needs no `--force` for them. A blind-audit
 worktree is one call each way: `new-lane.py blind-open --repo . --base "$BASE_SHA"
 --dir <path> [--brief F] [--input F]... [--probes-from DIR]` and
-`new-lane.py blind-close --dir <path>`.
+`new-lane.py blind-close --dir <path>`. Both closes are safe to re-run: when a
+removal was cut short (a process or shell held files in the lane) or the
+directory was deleted by hand, the next run deletes what is left - only a
+former lane or `*-blind` directly under `<repo>-lanes/`, links removed as links
+- prunes the registration and drops the trust entry; if something still holds
+a file it names the path and stops.
 
 By hand, when you need to see or vary the steps:
 
