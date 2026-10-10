@@ -1138,6 +1138,70 @@ def remove_worktree(repo: Path, path: Path) -> int:
     return clear_leftover(repo, path)
 
 
+def eol_style(data: bytes) -> bytes | None:
+    """b"\\r\\n" or b"\\n" when a text file ends every line the same way, else None."""
+    lf = data.count(b"\n")
+    if b"\0" in data or not lf:
+        return None
+    crlf = data.count(b"\r\n")
+    return b"\r\n" if crlf == lf else b"\n" if not crlf else None
+
+
+def eol_attributes(repo: Path, rels: list[str]) -> tuple[dict[str, bytes], set[str]]:
+    """({path: ending .gitattributes pins}, {paths marked -text})."""
+    if not rels:
+        return {}, set()
+    out = subprocess.run(["git", "check-attr", "-z", "--stdin", "eol", "text"], cwd=str(repo),
+                         input=b"\0".join(r.encode("utf-8") for r in rels), capture_output=True).stdout
+    fields = out.split(b"\0")
+    pinned, binary = {}, set()
+    for path, attr, value in zip(fields[0::3], fields[1::3], fields[2::3]):
+        rel = path.decode("utf-8", errors="replace")
+        if attr == b"eol" and value in (b"lf", b"crlf"):
+            pinned[rel] = b"\r\n" if value == b"crlf" else b"\n"
+        elif attr == b"text" and value == b"unset":
+            binary.add(rel)
+    return pinned, binary
+
+
+def eol_snapshot(main: Path, rels: list[str]) -> dict[str, bytes | None]:
+    """Each path's line ending in the main tree before integrating; None = new file."""
+    before = {}
+    for rel in rels:
+        path = main / rel
+        before[rel] = (eol_style(path.read_bytes()) or b"?") if path.is_file() else None
+    return before
+
+
+def restore_eol(main: Path, before: dict[str, bytes | None]) -> list[str]:
+    """Put each integrated file back on the line ending it had, or that is pinned for it.
+
+    Measured: integrated files arrived CRLF in a tree that holds them LF. Git
+    for Windows ships core.autocrlf=true, so `git apply` and `cherry-pick`
+    write CRLF for any path without an eol attribute, whatever ending the
+    main tree's copy had; and a new file is copied byte for byte, so a worker
+    that wrote CRLF delivers CRLF even where .gitattributes says eol=lf.
+    """
+    rels = list(before)
+    pinned, binary = eol_attributes(main, rels)
+    changed = []
+    for rel in rels:
+        path = main / rel
+        want = before[rel] if before[rel] is not None else pinned.get(rel)
+        if rel in binary or want not in (b"\n", b"\r\n") or path.is_symlink() or not path.is_file():
+            continue
+        data = path.read_bytes()
+        if b"\0" in data:
+            continue
+        fixed = data.replace(b"\r\n", b"\n")
+        if want == b"\r\n":
+            fixed = fixed.replace(b"\n", b"\r\n")
+        if fixed != data:
+            path.write_bytes(fixed)
+            changed.append(rel)
+    return changed
+
+
 def cmd_integrate(args: argparse.Namespace) -> int:
     lane = Path(args.lane).resolve()
     if not (lane / ".git").exists():
@@ -1163,6 +1227,12 @@ def cmd_integrate(args: argparse.Namespace) -> int:
         print("Commit or stash them, then run integrate again.")
         return 1
 
+    exclude = [".", ":(exclude).delegate-runs"]
+    changed_names = subprocess.run(["git", "diff", "--name-only", "-z", base, "--", *exclude],
+                                   cwd=str(lane), capture_output=True).stdout
+    before = eol_snapshot(main, [x.decode("utf-8", errors="replace")
+                                 for x in changed_names.split(b"\0") if x])
+
     commits = git(["rev-list", "--reverse", f"{base}..{head}"], cwd=lane).split()
     if commits and record.get("integrated_head") != head:
         out = subprocess.run(["git", "cherry-pick", *commits], cwd=str(main),
@@ -1175,8 +1245,7 @@ def cmd_integrate(args: argparse.Namespace) -> int:
             return 1
         print(f"cherry-picked {len(commits)} commit(s) onto the main tree")
 
-    exclude = [".", ":(exclude).delegate-runs"]
-    patch = subprocess.run(["git", "diff", "HEAD", "--binary", "--", *exclude], cwd=str(lane),
+    patch =subprocess.run(["git", "diff", "HEAD", "--binary", "--", *exclude], cwd=str(lane),
                            capture_output=True).stdout
     others = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z",
                              "--", *exclude], cwd=str(lane), capture_output=True).stdout
@@ -1210,6 +1279,11 @@ def cmd_integrate(args: argparse.Namespace) -> int:
         target = main / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(lane / rel, target, follow_symlinks=False)
+    before.update({rel: None for rel in untracked})
+    restored = restore_eol(main, before)
+    if restored:
+        print(f"line endings restored to the main tree's own in {len(restored)} file(s): "
+              + ", ".join(restored[:10]) + (" ..." if len(restored) > 10 else ""))
 
     record["integrated_head"] = head
     record["integrated_tree"] = lane_fingerprint(lane)
