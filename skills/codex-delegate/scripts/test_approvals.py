@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Containment tests for dispatch.py's approval filter. No processes, no I/O,
-except check_accept_env, which runs one generated ACCEPT.py in a temp lane.
+except check_accept_env and check_pytest_bridge, which run one generated
+ACCEPT.py and one pytest bridge in a temp lane.
 
 `approval_decision` is pure precisely so this file can exist, and it needs to:
 every regression below was found in the field, each one costing a whole worker
@@ -18,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -275,11 +277,33 @@ def check_test_edits(tmp: Path) -> int:
     return failures
 
 
+# Shared by the probes below: why `path` is not a safe tmp_path home, or "".
+# Tests that build a repo or a Unity project in tmp_path fail when it sits
+# inside one (12 Backend tests, measured 11 Oct 2026 with an in-lane basetemp).
+_OUTSIDE_CHECK = r'''
+import subprocess
+def not_outside(path, lane):
+    path = Path(path).resolve()
+    if path == Path(lane).resolve() or Path(lane).resolve() in path.parents:
+        return "inside the lane"
+    probe = path
+    while not probe.exists():
+        probe = probe.parent
+    if subprocess.run(["git", "-C", str(probe), "rev-parse", "--git-dir"],
+                      capture_output=True).returncode == 0:
+        return "inside a git repository"
+    for parent in [probe, *probe.parents]:
+        if (parent / "ProjectSettings" / "ProjectVersion.txt").is_file():
+            return "inside a Unity project"
+    return ""
+'''
+
 # Runs inside the generated ACCEPT.py's children. Exits non-zero, naming the
-# first variable that does not point into the lane's tmp/accept/.
+# first variable that does not point at the per-task dir outside the lane.
 _ENV_PROBE = r'''
 import os, shlex, sys, tempfile
 from pathlib import Path
+''' + _OUTSIDE_CHECK + r'''
 want = Path(os.environ["EXPECT_SCRATCH"]).resolve()
 bad = [k for k in ("TEMP", "TMP", "TMPDIR") if Path(os.environ.get(k, "")).resolve() != want]
 if Path(tempfile.gettempdir()).resolve() != want:
@@ -294,30 +318,51 @@ if opts[3:] != ["--basetemp=" + (want / "pytest").as_posix()]:
 with tempfile.NamedTemporaryFile(delete=False) as fh:
     if Path(fh.name).resolve().parent != want:
         bad.append("temp file landed at " + fh.name)
+where = not_outside(want, os.environ["EXPECT_LANE"])
+if where:
+    bad.append("scratch " + where)
 print("TEMP=" + os.environ.get("TEMP", ""))
 sys.exit("bad: " + ", ".join(bad) if bad else 0)
 '''
 
 
-def check_accept_env(tmp: Path) -> int:
-    """The generated ACCEPT.py gives every probe and command lane-local temp dirs.
-
-    Workers used to set TEMP/TMP themselves, and the filter above declines
-    that by design; this pins the replacement, so the worker never has to.
-    """
+def _new_lane():
     spec = importlib.util.spec_from_file_location("new_lane_under_test",
                                                   Path(__file__).with_name("new-lane.py"))
     nl = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(nl)
-    td = tmp / "lane" / ".delegate-runs" / "t1"
+    return nl
+
+
+def _git_lane(tmp: Path) -> Path:
+    """A lane that is a git repository and a Unity project, like the field one."""
+    lane = tmp / "lane"
+    (lane / "ProjectSettings").mkdir(parents=True)
+    (lane / "ProjectSettings" / "ProjectVersion.txt").write_text("m_EditorVersion: 6\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(lane)], check=True, capture_output=True)
+    return lane
+
+
+def check_accept_env(tmp: Path) -> int:
+    """The generated ACCEPT.py gives every probe and command one temp dir outside the lane.
+
+    Workers used to set TEMP/TMP themselves, and the filter above declines
+    that by design; this pins the replacement, so the worker never has to.
+    The dir is outside every git repository and Unity project: inside the
+    lane, tests that need tmp_path outside one failed.
+    """
+    nl = _new_lane()
+    lane = _git_lane(tmp)
+    td = lane / ".delegate-runs" / "t1"
     (td / "probes").mkdir(parents=True)
     (td / "turn-1.md").write_text("# RUN t1 / turn 1\nfilled in\n", encoding="utf-8")
     (td / "probes" / "env_probe.py").write_text(_ENV_PROBE, encoding="utf-8")
     probe_copy = tmp / "env_probe_cmd.py"
     probe_copy.write_text(_ENV_PROBE, encoding="utf-8")
-    nl.write_accept(td, {"commands": [[sys.executable, str(probe_copy)]]}, [])
-    scratch = td / "tmp" / "accept"
-    env = dict(os.environ, PYTEST_ADDOPTS="--preexisting", EXPECT_SCRATCH=str(scratch))
+    scratch = nl.accept_scratch("t1")
+    nl.write_accept(td, {"commands": [[sys.executable, str(probe_copy)]]}, [], scratch)
+    env = dict(os.environ, PYTEST_ADDOPTS="--preexisting", EXPECT_SCRATCH=str(scratch),
+               EXPECT_LANE=str(lane))
     env.pop("PYTHONDONTWRITEBYTECODE", None)
     r = subprocess.run([sys.executable, str(td / "ACCEPT.py")], env=env,
                        capture_output=True, text=True, encoding="utf-8",
@@ -325,10 +370,18 @@ def check_accept_env(tmp: Path) -> int:
     out = r.stdout + r.stderr
     checks = [
         ("ACCEPT.py exits 0 with ACCEPT ALL OK", r.returncode == 0 and out.rstrip().endswith("ACCEPT ALL OK")),
-        ("probe saw TEMP/TMP/TMPDIR/pytest opts in the lane", "ok   probe env_probe.py" in out),
+        ("probe saw TEMP/TMP/TMPDIR/pytest opts outside the lane and any repo",
+         "ok   probe env_probe.py" in out),
         ("command saw the same", "ok   command " in out),
-        ("tmp/accept removed after a pass", not scratch.exists() and (td / "tmp").is_dir()),
+        ("scratch dir removed after a pass", not scratch.exists()),
     ]
+    # A failing run keeps the dir for a look; close removes it.
+    (td / "probes" / "fail.py").write_text("raise SystemExit(3)\n", encoding="utf-8")
+    r2 = subprocess.run([sys.executable, str(td / "ACCEPT.py")], env=env, capture_output=True,
+                        text=True, encoding="utf-8", errors="replace", timeout=300)
+    checks.append(("scratch dir kept after a failure", r2.returncode == 1 and scratch.is_dir()))
+    nl.drop_accept_scratch(None, "t1")
+    checks.append(("drop_accept_scratch removes it", not scratch.exists()))
     failures = 0
     for name, ok in checks:
         failures += not ok
@@ -338,17 +391,98 @@ def check_accept_env(tmp: Path) -> int:
     return failures
 
 
+# Exit 0 only when the bridge handed pytest a basetemp outside the lane and
+# every repo, with its parent already created (pytest makes only the leaf).
+_FAKE_PYTEST = r'''
+import os, sys
+from pathlib import Path
+''' + _OUTSIDE_CHECK + r'''
+args = sys.argv[1:]
+bad = []
+if args[:2] != ["-p", "no:cacheprovider"]:
+    bad.append("no cacheprovider off: " + repr(args))
+base = [a for a in args if a.startswith("--basetemp=")]
+if len(base) != 1:
+    bad.append("basetemp " + repr(base))
+else:
+    path = Path(base[0].split("=", 1)[1])
+    if path.resolve() != Path(os.environ["EXPECT_SCRATCH"]).resolve() / "pytest":
+        bad.append("basetemp at " + str(path))
+    if not path.parent.is_dir():
+        bad.append("basetemp parent missing")
+    where = not_outside(path, os.environ["EXPECT_LANE"])
+    if where:
+        bad.append("basetemp " + where)
+if args[-2:] != ["-q", "two words"]:
+    bad.append("arguments not passed through: " + repr(args))
+if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1":
+    bad.append("PYTHONDONTWRITEBYTECODE")
+print("bad: " + ", ".join(bad) if bad else "fake pytest ok")
+sys.exit(4 if bad else 0)
+'''
+
+
+def check_pytest_bridge(tmp: Path) -> int:
+    """open's pytest bridge runs pytest with a basetemp outside the lane, and
+    the worker's call to it passes the approval filter and the spec gate."""
+    nl = _new_lane()
+    lane = _git_lane(tmp)
+    td = lane / ".delegate-runs" / "t2"
+    td.mkdir(parents=True)
+    scratch = nl.accept_scratch("t2")
+    shutil.rmtree(scratch, ignore_errors=True)
+    written = nl.write_pytest_bridge(td, Path(sys.executable), scratch)
+    fake = tmp / "fake"
+    (fake / "pytest").mkdir(parents=True)
+    (fake / "pytest" / "__init__.py").write_text("", encoding="utf-8")
+    (fake / "pytest" / "__main__.py").write_text(_FAKE_PYTEST, encoding="utf-8")
+    bridge = td / ("pytest.cmd" if WIN else "pytest.sh")
+    env = dict(os.environ, PYTHONPATH=str(fake), EXPECT_SCRATCH=str(scratch), EXPECT_LANE=str(lane))
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    r = subprocess.run([str(bridge), "-q", "two words"], cwd=lane, env=env, capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", timeout=300)
+    out = r.stdout + r.stderr
+    (fake / "pytest" / "__main__.py").write_text("raise SystemExit(7)\n", encoding="utf-8")
+    r7 = subprocess.run([str(bridge)], cwd=lane, env=env, capture_output=True, timeout=300)
+    ext = "cmd" if WIN else "sh"
+    shell = (["cmd", "/c"] if WIN else ["sh", "-c"])
+    calls = [
+        ({"command": [f".delegate-runs/t2/pytest.{ext}", "-q", "Backend/tests"], "cwd": "."}, "."),
+        ({"command": [*shell, f".delegate-runs/t2/pytest.{ext} -q Backend/tests"], "cwd": "."}, "."),
+        ({"command": [*shell, f"../.delegate-runs/t2/pytest.{ext} -q tests"], "cwd": "Backend"}, "Backend"),
+    ]
+    gate = f"## ACCEPTANCE\n- `.delegate-runs/t2/pytest.{ext} -q Backend/tests`\n"
+    checks = [
+        ("open writes pytest.cmd and pytest.sh", sorted(Path(p).name for p in written)
+         == ["pytest.cmd", "pytest.sh"] and all(Path(p).is_file() for p in written)),
+        ("bridge runs pytest with an outside basetemp", r.returncode == 0 and "fake pytest ok" in out),
+        ("bridge passes pytest's exit code through", r7.returncode == 7),
+        ("bridge path names no TEMP or outside path", all(
+            dsp.approval_decision(CMD, params, LANE)[0] == "approve" for params, _ in calls)),
+        ("bridge call passes the spec gate", dsp.acceptance_verdict(gate, LANE) is None),
+    ]
+    shutil.rmtree(scratch, ignore_errors=True)
+    failures = 0
+    for name, ok in checks:
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  pytest-bridge {name}")
+    if failures:
+        print(out[-3000:])
+        for params, _ in calls:
+            print(params, dsp.approval_decision(CMD, params, LANE))
+    return failures
+
+
 def check_brief_line() -> int:
     """PROMPT.txt tells the worker not to set TEMP itself, and the plain command passes."""
-    spec = importlib.util.spec_from_file_location("new_lane_brief",
-                                                  Path(__file__).with_name("new-lane.py"))
-    nl = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(nl)
+    nl = _new_lane()
     prompt = nl.build_prompt("worker", "t1", 1, False)
     accept = "## ACCEPTANCE\n- `python .delegate-runs/t1/ACCEPT.py`\n"
     checks = [
         ("contract forbids setting TEMP", "Never set TEMP, TMP or TMPDIR yourself" in prompt),
-        ("contract gives the basetemp argument", "--basetemp=.delegate-runs/<task-id>/tmp/pytest" in prompt),
+        ("contract names the pytest bridge", ".delegate-runs/<task-id>/pytest.cmd" in prompt
+         and "pytest.sh" in prompt),
+        ("contract no longer points basetemp into the lane", "/tmp/pytest" not in prompt),
         ("plain acceptance command passes the spec gate", dsp.acceptance_verdict(accept, LANE) is None),
     ]
     failures = 0
@@ -358,8 +492,9 @@ def check_brief_line() -> int:
     return failures
 
 
-ACCEPT_ENV_CHECKS = 4
-BRIEF_CHECKS = 3
+ACCEPT_ENV_CHECKS = 6
+BRIDGE_CHECKS = 5
+BRIEF_CHECKS = 4
 
 
 def main() -> int:
@@ -375,9 +510,11 @@ def main() -> int:
         failures += check_test_edits(Path(tmp))
     with tempfile.TemporaryDirectory() as tmp:
         failures += check_accept_env(Path(tmp))
+    with tempfile.TemporaryDirectory() as tmp:
+        failures += check_pytest_bridge(Path(tmp))
     failures += check_brief_line()
     total = (len(CASES) + len(ACCEPTANCE_CASES) + len(TEST_EDIT_CASES)
-             + ACCEPT_ENV_CHECKS + BRIEF_CHECKS)
+             + ACCEPT_ENV_CHECKS + BRIDGE_CHECKS + BRIEF_CHECKS)
     print(f"\n{total - failures}/{total} cases hold")
     return 1 if failures else 0
 

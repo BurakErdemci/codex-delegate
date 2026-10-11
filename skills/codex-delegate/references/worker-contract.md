@@ -93,11 +93,14 @@ the last error in the changelog detail. Do not thrash.
 
 Run the acceptance command exactly as written, with no wrapper around it. A
 generated `ACCEPT.py` already points its children's TEMP, TMP, TMPDIR and
-pytest cache at the task dir's `tmp/`. Never set TEMP, TMP or TMPDIR yourself,
-in any shell syntax: the approval filter declines every command that names
-them, and the turn ends blocked. For an extra pytest run, pass
-`-p no:cacheprovider --basetemp=.delegate-runs/<task-id>/tmp/pytest` as
-arguments instead.
+pytest basetemp at a per-task directory outside the repository and turns the
+pytest cache off. Never set TEMP, TMP or TMPDIR yourself, in any shell syntax:
+the approval filter declines every command that names them, and the turn ends
+blocked. For an extra pytest run, call the task dir's bridge,
+`.delegate-runs/<task-id>/pytest.cmd` (Windows) or `pytest.sh`, with your
+pytest arguments: it runs the lane's interpreter with the same settings. Do not
+pass `--basetemp` yourself, and never point it inside the lane: tests that need
+`tmp_path` outside any git repository or Unity project fail there.
 
 ## Changelog - fill in the file that is already there
 
