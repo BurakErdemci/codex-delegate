@@ -482,18 +482,13 @@ def write_pytest_bridge(td: Path, py: Path | None, scratch: Path) -> list[str]:
 def drop_accept_scratch(td: Path | None, task_id: str) -> None:
     """Remove the lane's outside-the-repo ACCEPT temp dir, if it is still there.
 
-    Reads the path `open` recorded in lane.json, but deletes only a directory
-    named after this task directly under ACCEPT_TMP_ROOT: a damaged record must
-    not turn close into an arbitrary rmtree.
+    The path is recomputed from the task id, never read from lane.json: the
+    worker can write lane.json, and a security review (11 Oct 2026) showed a
+    name-only check let a forged record aim close's rmtree at any
+    `serit-accept/<task-id>` directory on the machine.
     """
     path = accept_scratch(task_id)
-    try:
-        record = json.loads((td / "lane.json").read_text(encoding="utf-8")) if td else None
-        if isinstance(record, dict) and isinstance(record.get("accept_tmp"), str):
-            path = Path(record["accept_tmp"])
-    except (OSError, ValueError):
-        pass
-    if path.name != task_id or path.parent.name != ACCEPT_TMP_ROOT or not path.exists():
+    if not path.exists():
         return
     shutil.rmtree(path, ignore_errors=True)
     print(f"{'WARNING: could not remove' if path.exists() else 'removed'} acceptance temp dir {path}")
