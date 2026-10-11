@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Containment tests for dispatch.py's approval filter. No processes, no I/O.
+"""Containment tests for dispatch.py's approval filter. No processes, no I/O,
+except check_accept_env, which runs one generated ACCEPT.py in a temp lane.
 
 `approval_decision` is pure precisely so this file can exist, and it needs to:
 every regression below was found in the field, each one costing a whole worker
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -273,6 +275,93 @@ def check_test_edits(tmp: Path) -> int:
     return failures
 
 
+# Runs inside the generated ACCEPT.py's children. Exits non-zero, naming the
+# first variable that does not point into the lane's tmp/accept/.
+_ENV_PROBE = r'''
+import os, shlex, sys, tempfile
+from pathlib import Path
+want = Path(os.environ["EXPECT_SCRATCH"]).resolve()
+bad = [k for k in ("TEMP", "TMP", "TMPDIR") if Path(os.environ.get(k, "")).resolve() != want]
+if Path(tempfile.gettempdir()).resolve() != want:
+    bad.append("tempfile.gettempdir=" + tempfile.gettempdir())
+if os.environ.get("PYTHONDONTWRITEBYTECODE") != "1":
+    bad.append("PYTHONDONTWRITEBYTECODE")
+opts = shlex.split(os.environ.get("PYTEST_ADDOPTS", ""))
+if opts[:1] != ["--preexisting"] or opts[1:3] != ["-p", "no:cacheprovider"]:
+    bad.append("PYTEST_ADDOPTS=" + os.environ.get("PYTEST_ADDOPTS", ""))
+if opts[3:] != ["--basetemp=" + (want / "pytest").as_posix()]:
+    bad.append("basetemp " + repr(opts[3:]))
+with tempfile.NamedTemporaryFile(delete=False) as fh:
+    if Path(fh.name).resolve().parent != want:
+        bad.append("temp file landed at " + fh.name)
+print("TEMP=" + os.environ.get("TEMP", ""))
+sys.exit("bad: " + ", ".join(bad) if bad else 0)
+'''
+
+
+def check_accept_env(tmp: Path) -> int:
+    """The generated ACCEPT.py gives every probe and command lane-local temp dirs.
+
+    Workers used to set TEMP/TMP themselves, and the filter above declines
+    that by design; this pins the replacement, so the worker never has to.
+    """
+    spec = importlib.util.spec_from_file_location("new_lane_under_test",
+                                                  Path(__file__).with_name("new-lane.py"))
+    nl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nl)
+    td = tmp / "lane" / ".delegate-runs" / "t1"
+    (td / "probes").mkdir(parents=True)
+    (td / "turn-1.md").write_text("# RUN t1 / turn 1\nfilled in\n", encoding="utf-8")
+    (td / "probes" / "env_probe.py").write_text(_ENV_PROBE, encoding="utf-8")
+    probe_copy = tmp / "env_probe_cmd.py"
+    probe_copy.write_text(_ENV_PROBE, encoding="utf-8")
+    nl.write_accept(td, {"commands": [[sys.executable, str(probe_copy)]]}, [])
+    scratch = td / "tmp" / "accept"
+    env = dict(os.environ, PYTEST_ADDOPTS="--preexisting", EXPECT_SCRATCH=str(scratch))
+    env.pop("PYTHONDONTWRITEBYTECODE", None)
+    r = subprocess.run([sys.executable, str(td / "ACCEPT.py")], env=env,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=300)
+    out = r.stdout + r.stderr
+    checks = [
+        ("ACCEPT.py exits 0 with ACCEPT ALL OK", r.returncode == 0 and out.rstrip().endswith("ACCEPT ALL OK")),
+        ("probe saw TEMP/TMP/TMPDIR/pytest opts in the lane", "ok   probe env_probe.py" in out),
+        ("command saw the same", "ok   command " in out),
+        ("tmp/accept removed after a pass", not scratch.exists() and (td / "tmp").is_dir()),
+    ]
+    failures = 0
+    for name, ok in checks:
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  accept-env {name}")
+    if failures:
+        print(out[-3000:])
+    return failures
+
+
+def check_brief_line() -> int:
+    """PROMPT.txt tells the worker not to set TEMP itself, and the plain command passes."""
+    spec = importlib.util.spec_from_file_location("new_lane_brief",
+                                                  Path(__file__).with_name("new-lane.py"))
+    nl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nl)
+    prompt = nl.build_prompt("worker", "t1", 1, False)
+    accept = "## ACCEPTANCE\n- `python .delegate-runs/t1/ACCEPT.py`\n"
+    checks = [
+        ("contract forbids setting TEMP", "Never set TEMP, TMP or TMPDIR yourself" in prompt),
+        ("contract gives the basetemp argument", "--basetemp=.delegate-runs/<task-id>/tmp/pytest" in prompt),
+        ("plain acceptance command passes the spec gate", dsp.acceptance_verdict(accept, LANE) is None),
+    ]
+    failures = 0
+    for name, ok in checks:
+        failures += not ok
+        print(f"{'ok  ' if ok else 'FAIL'}  brief {name}")
+    return failures
+
+
+ACCEPT_ENV_CHECKS = 4
+BRIEF_CHECKS = 3
+
+
 def main() -> int:
     failures = 0
     for expected, method, params, why in CASES:
@@ -284,7 +373,11 @@ def main() -> int:
     failures += check_acceptance()
     with tempfile.TemporaryDirectory() as tmp:
         failures += check_test_edits(Path(tmp))
-    total = len(CASES) + len(ACCEPTANCE_CASES) + len(TEST_EDIT_CASES)
+    with tempfile.TemporaryDirectory() as tmp:
+        failures += check_accept_env(Path(tmp))
+    failures += check_brief_line()
+    total = (len(CASES) + len(ACCEPTANCE_CASES) + len(TEST_EDIT_CASES)
+             + ACCEPT_ENV_CHECKS + BRIEF_CHECKS)
     print(f"\n{total - failures}/{total} cases hold")
     return 1 if failures else 0
 

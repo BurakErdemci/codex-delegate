@@ -261,7 +261,9 @@ commands = [["py", "-m", "pytest", "-q"]]     # a first element naming a tool ru
 
 `--probes-from` copies earlier probes and rewrites the old task id in them;
 `--accept` writes `.delegate-runs/$TASK_ID/ACCEPT.py` (changelog filled in,
-every probe exits 0, then the `[accept]` commands). `close` removes the links
+every probe exits 0, then the `[accept]` commands; each child runs with TEMP,
+TMP, TMPDIR and pytest's basetemp under `tmp/accept/` and no bytecode or pytest
+cache, so the worker never has to set them). `close` removes the links
 itself (never their targets), so it needs no `--force` for them. A blind-audit
 worktree is one call each way: `new-lane.py blind-open --repo . --base "$BASE_SHA"
 --dir <path> [--brief F] [--input F]... [--probes-from DIR]` and

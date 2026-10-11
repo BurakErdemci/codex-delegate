@@ -91,6 +91,14 @@ After implementing, run the spec's ACCEPTANCE command yourself. If it fails, fix
 and re-run. Maximum 5 attempts. Still failing -> stop with STATUS: failed and put
 the last error in the changelog detail. Do not thrash.
 
+Run the acceptance command exactly as written, with no wrapper around it. A
+generated `ACCEPT.py` already points its children's TEMP, TMP, TMPDIR and
+pytest cache at the task dir's `tmp/`. Never set TEMP, TMP or TMPDIR yourself,
+in any shell syntax: the approval filter declines every command that names
+them, and the turn ends blocked. For an extra pytest run, pass
+`-p no:cacheprovider --basetemp=.delegate-runs/<task-id>/tmp/pytest` as
+arguments instead.
+
 ## Changelog - fill in the file that is already there
 
 The architect has already created `.delegate-runs/<task-id>/turn-<N>.md` (N =

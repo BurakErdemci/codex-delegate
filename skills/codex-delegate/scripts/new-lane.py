@@ -436,6 +436,8 @@ ACCEPT_TEMPLATE = r"""#!/usr/bin/env python3
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -447,6 +449,28 @@ COMMANDS = __COMMANDS__
 task = Path(__file__).resolve().parent
 lane = task.parents[1]
 failures = []
+
+# Every child gets its temp and cache dirs inside the lane. Workers used to do
+# this themselves in a shell wrapper that set TEMP/TMP, and the dispatcher's
+# approval filter declines any command naming those variables - measured
+# 10-11 Oct 2026, 3 of 3 Python-tested turns ended BLOCKED-BY-APPROVALS with
+# acceptance never run. Kept in its own subdir so the worker's own tmp/ files
+# are never touched; removed when acceptance passes, kept for a look when not.
+scratch = task / "tmp" / "accept"
+shutil.rmtree(scratch, ignore_errors=True)
+scratch.mkdir(parents=True, exist_ok=True)
+
+
+def child_env(**extra):
+    env = dict(os.environ, **extra)
+    for key in ("TEMP", "TMP", "TMPDIR"):
+        env[key] = str(scratch)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # pytest splits PYTEST_ADDOPTS POSIX-style, where a backslash is an escape:
+    # the path goes in with forward slashes, quoted in case it has spaces.
+    opts = "-p no:cacheprovider --basetemp=" + shlex.quote((scratch / "pytest").as_posix())
+    env["PYTEST_ADDOPTS"] = (env.get("PYTEST_ADDOPTS", "") + " " + opts).strip()
+    return env
 
 
 def report(name, ok, output=""):
@@ -485,7 +509,7 @@ if not body.strip() or MARKER in body:
     sys.exit(1)
 report(f"changelog {changelog.name} is filled in", True)
 
-env = dict(os.environ, AUDIT_ROOT=str(lane))
+env = child_env(AUDIT_ROOT=str(lane))
 probes = task / "probes"
 py = bridge("py")
 for probe in sorted(probes.iterdir()) if probes.is_dir() else []:
@@ -502,12 +526,13 @@ for argv in COMMANDS:
     argv = list(argv)
     if argv and argv[0] in TOOLS and bridge(argv[0]):
         argv[0] = bridge(argv[0])
-    rc, out = run(argv)
+    rc, out = run(argv, env=child_env())
     report("command " + " ".join(argv), rc == 0, out)
 
 if failures:
     print(f"FAILED: {len(failures)}")
     sys.exit(1)
+shutil.rmtree(scratch, ignore_errors=True)
 print("ACCEPT ALL OK")
 """
 
