@@ -448,7 +448,18 @@ def accept_scratch(task_id: str) -> Path:
     them. The worker never names this path - it is written into ACCEPT.py and
     the bridge, which the approval filter does not read.
     """
-    return Path(tempfile.gettempdir()).resolve() / ACCEPT_TMP_ROOT / task_id
+    root = Path(tempfile.gettempdir()).resolve() / ACCEPT_TMP_ROOT
+    if os.name != "nt":
+        try:
+            os.mkdir(root, 0o700)
+        except FileExistsError:
+            pass
+        info = os.lstat(root)
+        if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or info.st_uid != os.getuid() or info.st_mode & 0o077):
+            raise SystemExit(f"BLOCK: {root} is not a private directory owned by you "
+                             "(symlink, other owner or group/other access) - remove it or fix its mode to 0700")
+    return root / task_id
 
 
 def write_pytest_bridge(td: Path, py: Path | None, scratch: Path) -> list[str]:
@@ -480,6 +491,7 @@ def write_pytest_bridge(td: Path, py: Path | None, scratch: Path) -> list[str]:
 
 
 def drop_accept_scratch(td: Path | None, task_id: str) -> None:
+    A shared POSIX temp root must not let another user redirect lint's writes.
     """Remove the lane's outside-the-repo ACCEPT temp dir, if it is still there.
 
     The path is recomputed from the task id, never read from lane.json: the
