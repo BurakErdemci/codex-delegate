@@ -555,7 +555,19 @@ def child_env(**extra):
     return env
 
 
+CRASH = re.compile(r"^Traceback \(most recent call last\):", re.M)
+
+
+def crashed(output):
+    # An uncaught exception other than an assert is the probe breaking, not a
+    # verdict on the code; say so, so the worker records it instead of stopping.
+    lines = [ln for ln in output.splitlines() if ln.strip()]
+    return bool(CRASH.search(output)) and bool(lines) and not lines[-1].startswith("AssertionError")
+
+
 def report(name, ok, output=""):
+    if not ok and crashed(output):
+        name += " (uncaught exception in the probe itself, not a verdict - record it in the changelog)"
     print(("ok   " if ok else "FAIL ") + name)
     tail = [ln for ln in output.splitlines() if ln.strip()][-(20 if not ok else 5):]
     for ln in tail:
@@ -628,7 +640,8 @@ def load_config(repo: Path) -> dict:
     runner). They are the same commands each time, so they live in the repo.
     """
     path = repo / CONFIG_NAME
-    cfg = {"links": [], "tools": {}, "commands": [], "writable": [], "ports": None}
+    cfg = {"links": [], "tools": {}, "commands": [], "writable": [], "ports": None,
+           "lint_timeout": LINT_TIMEOUT}
     if not path.is_file():
         return cfg
     try:
@@ -686,7 +699,12 @@ def load_config(repo: Path) -> dict:
         if not ok or not (1024 <= ports["base"] <= 65000) or not (1 <= ports["per_lane"] <= 1000):
             raise SystemExit(f"BLOCK: {path}: ports must be {{base = <1024-65000>, per_lane = <1-1000>}}")
         ports = (ports["base"], ports["per_lane"])
-    cfg.update(links=links, tools=tools, commands=commands, writable=writable, ports=ports)
+    lint = raw.get("lint", {})
+    timeout = lint.get("timeout", LINT_TIMEOUT) if isinstance(lint, dict) else None
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 1 <= timeout <= 600:
+        raise SystemExit(f"BLOCK: {path}: [lint] timeout must be a number of seconds, 1-600")
+    cfg.update(links=links, tools=tools, commands=commands, writable=writable, ports=ports,
+               lint_timeout=timeout)
     return cfg
 
 
@@ -729,6 +747,229 @@ def allocate_ports(repo: Path, cfg: dict) -> tuple[int, int] | None:
             return start, width
     raise SystemExit(f"BLOCK: no free probe port range: {PORT_SLOTS} ranges from {base} are all held "
                      "by open lanes - close some first")
+
+
+DELETES_HEADING = "ARCHITECT DELETES"
+
+
+def spec_text(lane: Path, task_id: str) -> str:
+    spec = task_dir(lane, task_id) / "SPEC.md"
+    try:
+        return spec.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def spec_section_lines(text: str, heading: str) -> list[str]:
+    """Bullet values under `## <heading>`, backticks stripped."""
+    out, inside = [], False
+    for line in text.splitlines():
+        if line.startswith("#"):
+            inside = line.lstrip("#").strip().upper() == heading
+            continue
+        item = line.strip()
+        if inside and item.startswith(("- ", "* ")):
+            value = item[2:].split(" #", 1)[0].strip().strip("`'\"")
+            if value:
+                out.append(value)
+    return out
+
+
+def tracked(lane: Path) -> set[str]:
+    out = subprocess.run(["git", "ls-files", "-z"], cwd=str(lane), capture_output=True)
+    return {p.decode("utf-8", errors="replace") for p in out.stdout.split(b"\0") if p}
+
+
+def apply_architect_deletes(lane: Path, task_id: str) -> list[str]:
+    """`git rm` each tracked path listed under SPEC.md's ## ARCHITECT DELETES.
+
+    Codex's sandbox cannot delete a file (apply_patch: "Failed to delete
+    file"), so a probe that needs a file gone burned two turns on 12 Oct 2026.
+    The architect lists the paths and this does the deleting before dispatch.
+    Only tracked files inside the lane, never a link, never outside it.
+    """
+    lines = []
+    paths = spec_section_lines(spec_text(lane, task_id), DELETES_HEADING)
+    if not paths:
+        return lines
+    known = tracked(lane)
+    for raw in paths:
+        rel = raw.replace("\\", "/")
+        while rel.startswith("./"):
+            rel = rel[2:]
+        rel = rel.rstrip("/")
+        target = lane / rel
+        if Path(rel).is_absolute() or ".." in Path(rel).parts or not _inside_real(target, lane):
+            lines.append(f"ARCHITECT DELETES: {raw!r} is not a path inside the lane - left alone")
+            continue
+        if rel.startswith(".delegate-runs/") or rel == ".delegate-runs":
+            lines.append(f"ARCHITECT DELETES: {raw!r} is in the run directory - left alone")
+            continue
+        is_dir = any(p.startswith(rel + "/") for p in known)
+        if rel not in known and not is_dir:
+            state = "already deleted" if not os.path.lexists(target) else "not a tracked file, left alone"
+            lines.append(f"ARCHITECT DELETES: {rel} {state}")
+            continue
+        out = subprocess.run(["git", "rm", "-q", *(["-r"] if is_dir else []), "--", rel],
+                             cwd=str(lane), capture_output=True,
+                             text=True, encoding="utf-8", errors="replace")
+        lines.append(f"ARCHITECT DELETES: {'deleted ' + rel if out.returncode == 0 else 'FAILED ' + rel + ': ' + out.stderr.strip()[:200]}")
+    return lines
+
+
+LINT_TIMEOUT = 20
+NO_DELETION = re.compile(r"\bno file deletion\b", re.I)
+# A negated existence test on one line: Python and Node spellings.
+GONE_CHECK = re.compile(
+    r"not\s+[^\n]*\b(?:exists|is_file|is_dir|isfile|isdir|lexists)\s*\("
+    r"|\b(?:exists|is_file|is_dir|isfile|isdir|lexists)\s*\([^\n]*\)\s*(?:is\s+False|==\s*False)"
+    r"|!\s*(?:fs\.)?existsSync\s*\("
+    r"|\b(?:existsSync|exists|is_file)\s*\([^\n]*\)\s*(?:===?\s*false)", re.I)
+LITERAL = re.compile(r"""(['"])([^'"\n]{2,200})\1""")
+PY_CRASH = re.compile(r"^Traceback \(most recent call last\):", re.M)
+NODE_CRASH = re.compile(r"^\s+at .+[:(]\d+:\d+\)?\s*$", re.M)
+
+
+def gone_expectations(source: str, known: set[str]) -> list[str]:
+    """Tracked paths a probe line asserts do NOT exist (heuristic, line-based)."""
+    hits = []
+    folded = {p.casefold(): p for p in known}
+    dirs = {}
+    for p in known:
+        parts = p.split("/")
+        for i in range(1, len(parts)):
+            dirs.setdefault("/".join(parts[:i]).casefold(), "/".join(parts[:i]))
+    for line in source.splitlines():
+        if not GONE_CHECK.search(line):
+            continue
+        literals = [m.group(2).replace("\\", "/") for m in LITERAL.finditer(line)]
+        # `ROOT / "a" / "b.py"` spells one path in pieces; join neighbours too.
+        candidates = set(literals)
+        for i in range(len(literals)):
+            for j in range(i + 1, len(literals) + 1):
+                candidates.add("/".join(literals[i:j]))
+        keys = {cand.strip("/").removeprefix("./").casefold() for cand in candidates}
+        for key in keys:
+            if key in folded:
+                hits.append(folded[key])
+            elif key in dirs and not any(o.startswith(key + "/") for o in keys):
+                # "src" alone is a piece of "src"/"old.py", not a claim that src/ is gone.
+                hits.append(dirs[key] + "/")
+    return sorted(set(hits))
+
+
+def kill_tree(proc: subprocess.Popen) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+    try:
+        proc.communicate(timeout=10)
+    except (subprocess.TimeoutExpired, ValueError, OSError):
+        pass
+
+
+def probe_crash(output: str) -> str | None:
+    """The exception line when a probe died of an uncaught exception, else None.
+
+    An assert is the probe's verdict and counts as failing for the right reason;
+    anything else (a JSONDecodeError on a binary body, a KeyError, a
+    FileNotFoundError) is the probe breaking before it reached a verdict.
+    """
+    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+    if PY_CRASH.search(output):
+        tail = lines[-1] if lines else ""
+        return None if tail.startswith("AssertionError") else tail[:200]
+    if NODE_CRASH.search(output) and not re.search(r"AssertionError", output):
+        thrown = next((ln for ln in lines if re.match(r"^[A-Za-z]*Error\b", ln)), lines[0] if lines else "")
+        return thrown[:200]
+    return None
+
+
+def lint_lane(lane: Path, task_id: str, timeout: float) -> tuple[list[str], list[str]]:
+    """(problems, notes) for the probes of a lane about to be dispatched.
+
+    (a) a probe asserting a tracked path is gone while SPEC.md forbids file
+        deletion - Codex cannot delete files, so the turn stops (2 turns lost,
+        12 Oct 2026);
+    (b) a probe that dies of an uncaught exception at base instead of failing
+        with a verdict - the worker then stops on the probe's bug.
+    Probes over `timeout` are killed (with their process tree) and reported as
+    skipped. Note what (b) cannot see: a crash on a code path the base never
+    reaches only shows up after the change.
+    """
+    td = task_dir(lane, task_id)
+    text = spec_text(lane, task_id)
+    probes = [p for d in ("probes", "prior-probes") if (td / d).is_dir()
+              for p in sorted((td / d).iterdir()) if p.suffix in (".py", ".js", ".cjs")]
+    problems, notes = [], []
+    if NO_DELETION.search(text):
+        known = tracked(lane)
+        listed = {p.replace("\\", "/").strip("/") for p in spec_section_lines(text, DELETES_HEADING)}
+        for probe in probes:
+            try:
+                source = probe.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            gone = [p for p in gone_expectations(source, known) if p.strip("/") not in listed]
+            if gone:
+                problems.append(
+                    f"{probe.parent.name}/{probe.name} expects tracked path(s) to be gone - "
+                    f"{', '.join(gone)} - but SPEC.md says no file deletion, and Codex cannot delete "
+                    f"files anyway. List them under `## {DELETES_HEADING}` in SPEC.md (open/turn/lint "
+                    "then `git rm` them in the lane) or delete them in the lane yourself before dispatch.")
+    record = read_record(td)
+    py = td / ("py.cmd" if os.name == "nt" else "py.sh")
+    scratch = accept_scratch(task_id).parent / (task_id + "-lint")
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ, AUDIT_ROOT=str(lane), TEMP=str(scratch), TMP=str(scratch), TMPDIR=str(scratch),
+               PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    if isinstance(record.get("port_base"), int) and isinstance(record.get("port_count"), int):
+        env["PROBE_PORT_BASE"], env["PROBE_PORT_COUNT"] = str(record["port_base"]), str(record["port_count"])
+    try:
+        for probe in probes:
+            argv = ([str(py) if py.is_file() else sys.executable, str(probe)] if probe.suffix == ".py"
+                    else ["node", str(probe)])
+            kwargs = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
+                      else {"start_new_session": True})
+            name = f"{probe.parent.name}/{probe.name}"
+            try:
+                proc = subprocess.Popen(argv, cwd=str(lane), env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **kwargs)
+            except OSError as exc:
+                notes.append(f"skipped {name}: cannot start ({exc})")
+                continue
+            try:
+                raw, _ = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                kill_tree(proc)
+                notes.append(f"skipped {name}: still running after {timeout:g}s (killed with its children)")
+                continue
+            out = raw.decode("utf-8", errors="replace")
+            crash = probe_crash(out) if proc.returncode != 0 else None
+            if crash:
+                problems.append(f"{name} crashed at base with an uncaught exception instead of failing "
+                                f"with a verdict: {crash}. Catch it in the probe and print a FAIL line.")
+            else:
+                notes.append(f"{name}: rc={proc.returncode} at base"
+                             + (" (passes before any change)" if proc.returncode == 0
+                                and probe.parent.name == "probes" and record.get("mode") == "worker" else ""))
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    return problems, notes
+
+
+def report_lint(problems: list[str], notes: list[str]) -> None:
+    for line in notes:
+        print(f"lint: {line}")
+    if problems:
+        print("LINT PROBLEMS - fix these before dispatch:")
+        for line in problems:
+            print(f"  ! {line}")
 
 
 def merged_tools(repo: Path, cfg: dict, cli: list[str]) -> list[str]:
@@ -1030,6 +1271,7 @@ def cmd_open(args: argparse.Namespace) -> int:
         created.append(str(td / "lane.json"))
 
         created += seed_turn(lane, args.task_id, args.turn, args.mode, recovery=False)
+        deleted = apply_architect_deletes(lane, args.task_id)
 
         if not args.no_trust:
             out = subprocess.run([sys.executable, str(DOCTOR), "--trust", str(lane)],
@@ -1064,8 +1306,11 @@ def cmd_open(args: argparse.Namespace) -> int:
         print(f"  + {path}")
     if ports:
         print(f"probe ports: {ports[0]}-{ports[0] + ports[1] - 1} (PROBE_PORT_BASE={ports[0]})")
+    for line in deleted:
+        print(line)
     print()
-    print_next_steps(lane, args.task_id, args.turn)
+    print_next_steps(lane, args.task_id, args.turn, lint=not args.no_lint,
+                     override=args.lint_override, timeout=args.lint_timeout or cfg["lint_timeout"])
     return 0
 
 
@@ -1087,9 +1332,36 @@ def cmd_turn(args: argparse.Namespace) -> int:
     mode = lane_mode(lane, args.task_id, args.mode)
     for path in seed_turn(lane, args.task_id, args.turn, mode, args.recovery):
         print(f"  ~ {path}")
+    for line in apply_architect_deletes(lane, args.task_id):
+        print(line)
     print()
-    print_next_steps(lane, args.task_id, args.turn)
+    print_next_steps(lane, args.task_id, args.turn, lint=not args.no_lint, override=args.lint_override,
+                     timeout=args.lint_timeout or load_config(main_repo_of(lane))["lint_timeout"])
     return 0
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    """Re-run the pre-dispatch lint; print the dispatch line when it is clean.
+
+    The way back after a lint block: fix the probe or SPEC.md (or list the
+    files under ARCHITECT DELETES), run this, and it prints the dispatch line;
+    --override prints it despite the problems. --report-only never prints it
+    (serit uses that and prints its own).
+    """
+    lane = Path(args.lane).resolve()
+    td = task_dir(lane, args.task_id)
+    if not td.is_dir():
+        raise SystemExit(f"BLOCK: no run directory at {td} - check --task-id")
+    for line in apply_architect_deletes(lane, args.task_id):
+        print(line)
+    timeout = args.lint_timeout or load_config(main_repo_of(lane))["lint_timeout"]
+    if args.report_only:
+        problems, notes = lint_lane(lane, args.task_id, timeout)
+        report_lint(problems, notes)
+        return 3 if problems else 0
+    turns = [int(m.group(1)) for p in td.glob("turn-*.md") if (m := re.fullmatch(r"turn-(\d+)\.md", p.name))]
+    return print_next_steps(lane, args.task_id, max(turns, default=1), lint=True,
+                            override=args.override, timeout=timeout)
 
 
 def dispatch_interpreter() -> str:
@@ -1118,7 +1390,29 @@ def dispatch_interpreter() -> str:
         "subcommand afterwards to get the dispatch line, rather than opening again.")
 
 
-def print_next_steps(lane: Path, task_id: str, turn: int) -> None:
+def dispatch_extra(td: Path) -> list[str]:
+    """--timeout/--model/--effort serit recorded in lane.json, re-validated.
+
+    lane.json is writable by the worker, so nothing from it reaches the
+    printed command line unless it is a plain number or word.
+    """
+    extra = read_record(td).get("dispatch")
+    out: list[str] = []
+    if not isinstance(extra, dict):
+        return out
+    timeout = extra.get("timeout")
+    if isinstance(timeout, int) and not isinstance(timeout, bool) and 60 <= timeout <= 86400:
+        out.append(f"--timeout {timeout}")
+    for key in ("model", "effort"):
+        value = extra.get(key)
+        if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", value):
+            out.append(f"--{key} {value}")
+    return out
+
+
+def print_next_steps(lane: Path, task_id: str, turn: int, lint: bool = True,
+                     override: bool = False, timeout: float = LINT_TIMEOUT) -> int:
+    """Print the dispatch line; 0 when printed, 3 when the spec or the lint withheld it."""
     td = task_dir(lane, task_id)
     state = spec_state(lane, task_id)
     if state != "ok":
@@ -1128,12 +1422,23 @@ def print_next_steps(lane: Path, task_id: str, turn: int) -> None:
         print(f"SPEC.md is {state}. Write {td / 'SPEC.md'} "
               f"(template: {SKILL_ROOT / 'references' / 'spec-template.md'}), then re-run "
               f"this script's `turn` subcommand for the dispatch line.")
-        return
+        return 3
+    if lint:
+        problems, notes = lint_lane(lane, task_id, timeout)
+        report_lint(problems, notes)
+        if problems and not override:
+            print(f"DISPATCH LINE WITHHELD: {len(problems)} lint problem(s) above would stop the worker. "
+                  f"Fix them, then run: \"{sys.executable}\" \"{Path(__file__).resolve()}\" lint "
+                  f"--lane \"{lane}\" --task-id \"{task_id}\"  (add --override to print the line anyway)")
+            return 3
+        if problems:
+            print("lint: --override given - printing the dispatch line despite the problems above")
     py = dispatch_interpreter()          # may BLOCK - resolve before announcing
     print("dispatch (detached; poll the DONE file, do not build a watcher loop):")
     argv = [f'"{py}"', f'"{DISPATCH}"',
             f'--task-dir "{td}"', f'--repo "{lane}"',
-            f'--prompt-file "{td / "PROMPT.txt"}"', f'--done-file "{td / "DONE"}"']
+            f'--prompt-file "{td / "PROMPT.txt"}"', f'--done-file "{td / "DONE"}"',
+            *dispatch_extra(td)]
     if os.name == "nt":
         # One line: `\` is not a continuation in PowerShell or cmd, and a
         # pasted multi-line command silently truncates at the first break.
@@ -1145,6 +1450,7 @@ def print_next_steps(lane: Path, task_id: str, turn: int) -> None:
     print()
     print(f"close when done:  \"{py}\" \"{Path(__file__).resolve()}\" close "
           f"--lane \"{lane}\" --task-id \"{task_id}\"")
+    return 0
 
 
 def cmd_close(args: argparse.Namespace) -> int:
@@ -1580,6 +1886,17 @@ def main() -> int:
     op.add_argument("--turn", type=int, default=1)
     op.add_argument("--no-trust", action="store_true",
                     help="skip doctor.py --trust (the worker will not run without it)")
+    lint_args = [
+        (("--no-lint",), {"action": "store_true",
+                          "help": "skip the pre-dispatch probe lint (serit runs `lint` itself later)"}),
+        (("--lint-override",), {"action": "store_true",
+                                "help": "print the dispatch line even when the lint finds problems"}),
+        (("--lint-timeout",), {"type": float, "default": None, "metavar": "SECONDS",
+                               "help": f"per-probe lint timeout (default: [lint] timeout in "
+                                       f"{CONFIG_NAME}, else {LINT_TIMEOUT}s); slower probes are skipped"}),
+    ]
+    for names, kw in lint_args:
+        op.add_argument(*names, **kw)
     op.set_defaults(func=cmd_open)
 
     tp = sub.add_parser("turn", help="seed the next turn and re-point PROMPT.txt")
@@ -1590,7 +1907,19 @@ def main() -> int:
                     help="override the mode recorded by `open` (normally unnecessary)")
     tp.add_argument("--recovery", action="store_true",
                     help="use the recovery instruction line (assess the tree, finish what is missing)")
+    for names, kw in lint_args:
+        tp.add_argument(*names, **kw)
     tp.set_defaults(func=cmd_turn)
+
+    lp = sub.add_parser("lint", help="re-run the pre-dispatch probe lint; print the dispatch line when clean")
+    lp.add_argument("--lane", type=Path, required=True)
+    lp.add_argument("--task-id", required=True)
+    lp.add_argument("--override", action="store_true",
+                    help="print the dispatch line even when the lint finds problems")
+    lp.add_argument("--report-only", action="store_true",
+                    help="never print the dispatch line; exit 3 on problems, 0 when clean")
+    lp.add_argument("--lint-timeout", type=float, default=None, metavar="SECONDS")
+    lp.set_defaults(func=cmd_lint)
 
     cp = sub.add_parser("close", help="archive the contract, remove the worktree, drop trust")
     cp.add_argument("--lane", type=Path, required=True)
