@@ -510,6 +510,7 @@ MARKER = __MARKER__
 TOOLS = __TOOLS__
 COMMANDS = __COMMANDS__
 SCRATCH = __SCRATCH__
+PORTS = __PORTS__
 
 # A cp1252 console cannot print Turkish probe output: measured 12 Oct 2026,
 # ACCEPT.py died with UnicodeEncodeError on a probe's "ı", and the worker
@@ -543,6 +544,10 @@ def child_env(**extra):
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    if PORTS:
+        # This lane's own port range: two lanes whose probes both used 8026
+        # failed each other (measured 12 Oct 2026). Probes may ignore it.
+        env["PROBE_PORT_BASE"], env["PROBE_PORT_COUNT"] = str(PORTS[0]), str(PORTS[1])
     # pytest splits PYTEST_ADDOPTS POSIX-style, where a backslash is an escape:
     # the path goes in with forward slashes, quoted in case it has spaces.
     opts = "-p no:cacheprovider --basetemp=" + shlex.quote((scratch / "pytest").as_posix())
@@ -623,7 +628,7 @@ def load_config(repo: Path) -> dict:
     runner). They are the same commands each time, so they live in the repo.
     """
     path = repo / CONFIG_NAME
-    cfg = {"links": [], "tools": {}, "commands": []}
+    cfg = {"links": [], "tools": {}, "commands": [], "writable": [], "ports": None}
     if not path.is_file():
         return cfg
     try:
@@ -662,8 +667,68 @@ def load_config(repo: Path) -> dict:
             or not all(isinstance(c, list) and c and all(isinstance(a, str) for a in c)
                        for c in commands)):
         raise SystemExit(f"BLOCK: {path}: [accept] commands must be a list of argv lists")
-    cfg.update(links=links, tools=tools, commands=commands)
+    # Runtime output the code writes on its own (an app logger creating logs/
+    # on import). serit adds these globs to every FILE WHITELIST and keeps them
+    # out of DO-NOT-TOUCH: measured 12 Oct 2026, a verify lane whose spec
+    # forbade everything outside the task dir stopped on the app's own logs/.
+    writable = raw.get("writable", [])
+    if not isinstance(writable, list) or not all(isinstance(x, str) and x.strip() for x in writable):
+        raise SystemExit(f"BLOCK: {path}: writable must be a list of repo-relative glob strings")
+    for rel in writable:
+        parts = Path(rel).parts
+        if Path(rel).is_absolute() or ".." in parts or rel.startswith(("/", "\\")):
+            raise SystemExit(f"BLOCK: {path}: writable {rel!r} must be a glob inside the repo")
+    ports = raw.get("ports")
+    if ports is not None:
+        ok = (isinstance(ports, dict) and set(ports) <= {"base", "per_lane"}
+              and all(isinstance(ports.get(k), int) and not isinstance(ports.get(k), bool)
+                      for k in ("base", "per_lane")))
+        if not ok or not (1024 <= ports["base"] <= 65000) or not (1 <= ports["per_lane"] <= 1000):
+            raise SystemExit(f"BLOCK: {path}: ports must be {{base = <1024-65000>, per_lane = <1-1000>}}")
+        ports = (ports["base"], ports["per_lane"])
+    cfg.update(links=links, tools=tools, commands=commands, writable=writable, ports=ports)
     return cfg
+
+
+PORT_SLOTS = 64
+
+
+def port_records(repo: Path) -> list[tuple[Path, dict]]:
+    """Every lane.json and blind .blind.json under this repo's lanes root."""
+    root = lanes_root(repo)
+    found = []
+    if not root.is_dir():
+        return found
+    for path in [*root.glob("*/.delegate-runs/*/lane.json"), *root.glob("*/verify/.blind.json")]:
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict):
+            found.append((path, record))
+    return found
+
+
+def allocate_ports(repo: Path, cfg: dict) -> tuple[int, int] | None:
+    """The lowest free `per_lane`-wide range from `base` among the open lanes.
+
+    Two lanes whose probes both served on 8026 at the same time failed each
+    other's acceptance (measured 12 Oct 2026). A range recorded by an open lane
+    or blind worktree stays taken until it is closed; ranges handed out by hand
+    (a SPEC that says "8020-8029") are not seen, so start `base` above them.
+    """
+    if not cfg.get("ports"):
+        return None
+    base, width = cfg["ports"]
+    taken = {r.get("port_base") for _, r in port_records(repo) if isinstance(r.get("port_base"), int)}
+    for slot in range(PORT_SLOTS):
+        start = base + slot * width
+        if start + width - 1 > 65535:
+            break
+        if start not in taken:
+            return start, width
+    raise SystemExit(f"BLOCK: no free probe port range: {PORT_SLOTS} ranges from {base} are all held "
+                     "by open lanes - close some first")
 
 
 def merged_tools(repo: Path, cfg: dict, cli: list[str]) -> list[str]:
@@ -876,12 +941,14 @@ def copy_probes(src: Path, dest: Path, new_id: str) -> list[str]:
     return copied
 
 
-def write_accept(td: Path, cfg: dict, tool_names: list[str], scratch: Path | None = None) -> str:
+def write_accept(td: Path, cfg: dict, tool_names: list[str], scratch: Path | None = None,
+                 ports: tuple[int, int] | None = None) -> str:
     scratch = scratch or accept_scratch(td.name)
     text = (ACCEPT_TEMPLATE.replace("__MARKER__", json.dumps(SKELETON_MARKER))
             .replace("__TOOLS__", json.dumps(tool_names))
             .replace("__COMMANDS__", json.dumps(cfg["commands"]))
-            .replace("__SCRATCH__", json.dumps(str(scratch))))
+            .replace("__SCRATCH__", json.dumps(str(scratch)))
+            .replace("__PORTS__", repr(list(ports)) if ports else "None"))
     path = td / "ACCEPT.py"
     path.write_text(text, encoding="utf-8", newline="")
     return str(path)
@@ -947,16 +1014,19 @@ def cmd_open(args: argparse.Namespace) -> int:
             created += copy_probes(args.probes_from, td / "probes", args.task_id)
         (td / "tmp").mkdir(exist_ok=True)
         created.append(str(td / "tmp"))
+        ports = allocate_ports(repo, cfg)
         if args.accept:
             names = [spec.partition("=")[0].strip() for spec in tool_specs]
-            created.append(write_accept(td, cfg, names, scratch))
+            created.append(write_accept(td, cfg, names, scratch, ports))
 
         # Written before the seeding so `turn` can find it even if the run dies
         # halfway: it is what stops a later turn from rebuilding an audit
         # PROMPT.txt as a worker one.
-        (td / "lane.json").write_text(
-            json.dumps({"task_id": args.task_id, "mode": args.mode, "base_sha": base,
-                        "links": links, "accept_tmp": str(scratch)}, indent=2), encoding="utf-8")
+        record = {"task_id": args.task_id, "mode": args.mode, "base_sha": base,
+                  "links": links, "accept_tmp": str(scratch)}
+        if ports:
+            record.update(port_base=ports[0], port_count=ports[1])
+        (td / "lane.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         created.append(str(td / "lane.json"))
 
         created += seed_turn(lane, args.task_id, args.turn, args.mode, recovery=False)
@@ -992,6 +1062,8 @@ def cmd_open(args: argparse.Namespace) -> int:
     print(f"task dir: {td}")
     for path in created:
         print(f"  + {path}")
+    if ports:
+        print(f"probe ports: {ports[0]}-{ports[0] + ports[1] - 1} (PROBE_PORT_BASE={ports[0]})")
     print()
     print_next_steps(lane, args.task_id, args.turn)
     return 0
@@ -1432,8 +1504,13 @@ def cmd_blind_open(args: argparse.Namespace) -> int:
             shutil.copyfile(f, verify / Path(f).name)
         if args.probes_from:
             copy_probes(args.probes_from, verify / "prior-probes", "blind")
-        (verify / ".blind.json").write_text(
-            json.dumps({"base_sha": base, "links": links}, indent=2), encoding="utf-8")
+        blind_record = {"base_sha": base, "links": links}
+        # Its own range, not its lane's: the blind auditor runs the same probes
+        # at the same time as the Codex lane.
+        ports = allocate_ports(repo, cfg)
+        if ports:
+            blind_record.update(port_base=ports[0], port_count=ports[1])
+        (verify / ".blind.json").write_text(json.dumps(blind_record, indent=2), encoding="utf-8")
     except BaseException:
         unlink_links(wt, links)
         git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
