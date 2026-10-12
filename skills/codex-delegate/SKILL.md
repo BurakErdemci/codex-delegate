@@ -250,9 +250,74 @@ links = [".venv", "frontend/node_modules"]    # linked into the lane, hidden fro
 py = ".venv/bin/python"                       # same as --tool py=<repo>/.venv/bin/python
 # per platform, for a config shared by Windows and macOS:
 # py = { windows = ".venv/Scripts/python.exe", posix = ".venv/bin/python" }
+writable = ["logs/**"]                        # runtime output the code writes by itself (optional)
+ports = { base = 8030, per_lane = 10 }        # each lane's own probe port range (optional)
 [accept]
 commands = [["py", "-m", "pytest", "-q"]]     # a first element naming a tool runs via its bridge
+[lint]
+timeout = 20                                  # seconds per probe in the pre-dispatch lint (optional)
 ```
+
+- `writable` - globs the code under test writes on its own when it runs (an
+  app logger creating `logs/` on import). `serit` adds them to every FILE
+  WHITELIST, names them in LANE ENVIRONMENT and keeps every DO-NOT-TOUCH line
+  from forbidding them. Measured 12 Oct 2026: a verify spec saying "every file
+  outside the task dir" met the app's own `logs/` and Codex, correctly,
+  stopped.
+- `ports` - `open` and `blind-open` give each lane and each blind worktree the
+  lowest free `per_lane`-wide range from `base` (recorded as `port_base` in
+  `lane.json` / `.blind.json`, free again after `close`), and ACCEPT.py hands
+  every child `PROBE_PORT_BASE` and `PROBE_PORT_COUNT`. Probes that hard-code a
+  port still collide - two lanes both serving on 8026 failed each other on 12
+  Oct 2026 - so write probes as `int(os.environ.get("PROBE_PORT_BASE", "8030"))`
+  plus an offset. Ranges a SPEC handed out by hand are invisible to the
+  allocator; put `base` above them.
+- `[lint] timeout` - see the lint below.
+
+Generated ACCEPT.py files print UTF-8 whatever the console: they reconfigure
+their own stdout/stderr and pass `PYTHONIOENCODING=utf-8` and `PYTHONUTF8=1`
+to every child. Measured 12 Oct 2026: a probe printing Turkish crashed ACCEPT.py
+with UnicodeEncodeError on a cp1252 pipe, and the worker cannot set the
+variable itself (the approval filter declines it), so it stopped.
+
+**The pre-dispatch lint.** `open` and `turn` run every probe in `probes/` and
+`prior-probes/` once at the lane HEAD, with the lane's port range, and withhold
+the dispatch line when either of two things would stop the worker:
+
+- a probe dies of an uncaught exception (a traceback that is not an
+  `AssertionError`, or a node stack trace) instead of failing with a verdict -
+  the worker then stops on the probe's bug, not the code's. An ACCEPT.py run
+  labels such a failure "uncaught exception in the probe itself" as well. The
+  lint cannot see a crash on a code path the base never reaches (measured: a
+  probe decoding a binary download as JSON crashed only after the fix), so
+  wrap every step of a probe and print a FAIL line with the reason;
+- a probe checks that a tracked path does NOT exist while SPEC.md says "No file
+  deletion" - see the deletion rule below.
+
+A probe over the timeout is killed with its process tree and reported as
+skipped. The fix-then-retry loop is `new-lane.py lint --lane "$LANE" --task-id
+"$TASK_ID"`: it re-applies ARCHITECT DELETES, re-runs the lint and prints the
+dispatch line once clean; `--override` prints it anyway, `--report-only` never
+does (exit 3 = problems), and `open`/`turn --no-lint` skip it (serit runs
+`lint` itself once inputs/ and prior-probes/ are in place).
+
+**Codex cannot delete files: the architect deletes before dispatch.** Its
+sandbox refuses (apply_patch "Failed to delete file"), and a spec that also
+says "No file deletion" turns a probe needing two files gone into two wasted
+turns (12 Oct 2026). List such paths in SPEC.md:
+
+```
+## ARCHITECT DELETES
+- src/old_module.py
+```
+
+`open`, `turn` and `lint` `git rm` each listed tracked path inside the lane
+(never outside it, never under `.delegate-runs/`, idempotent), so the lane the
+worker sees already lacks them and the deletion travels with `integrate`.
+
+**Give each lane's probes its own port range.** Use `ports` above, or hand
+ranges out by hand that no two concurrent lanes share - including a lane and
+its own blind worktree, which run the same probes at the same time.
 
 ```bash
 "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" open --task-id "$TASK_ID" --base "$BASE_SHA" \
@@ -406,7 +471,17 @@ instruction line with the new N, seed the new turn's skeleton, and confirm
 "$PY_BIN" "$SKILL_DIR/scripts/new-lane.py" turn --lane "$LANE" --task-id "$TASK_ID" --turn <N>
 # --recovery swaps in the recovery instruction line (§10)
 # refuses when turn-<N-1>.md is absent, or when turn-<N>.md is already filled in
+# applies ARCHITECT DELETES and runs the pre-dispatch lint (§4, per-repo config)
 ```
+
+**A permission change in a turn updates FILE WHITELIST and DO-NOT-TOUCH
+together.** A note in the amendment cannot lift either: measured 12 Oct 2026,
+a turn that said "logs/ is allowed" left the whitelist and the verify spec's
+"every file outside the task dir" line as they were, and Codex refused, as the
+contract tells it to. Grant paths through `serit` turn's `files_add`, which
+adds them to the whitelist, rewrites that DO-NOT-TOUCH line to exempt what the
+whitelist lists and drops any bullet the new paths cover; by hand, edit both
+sections in the same change.
 
 ## 5. Dispatch
 
@@ -779,6 +854,8 @@ All four live in `$SKILL_DIR/scripts/` and run under `"$PY_BIN"` on both
 platforms. None of them makes a decision that belongs to the architect.
 
 - `doctor.py` - preflight, worker home, trust entries, MCP handover
-- `new-lane.py` - `open` / `turn` / `close`: the lane scaffold and its cleanup
+- `new-lane.py` - `open` / `turn` / `lint` / `close`: the lane scaffold, the
+  pre-dispatch probe lint and the cleanup (`test_lane_features.py` pins the
+  config, port, deletion and lint cases; `test_approvals.py` the filter)
 - `dispatch.py` - one worker turn, with `--done-file` as the completion signal
 - `run-probes.py` - run audit probes, verify the runner and the root, one verdict table
