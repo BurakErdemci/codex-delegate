@@ -511,6 +511,14 @@ TOOLS = __TOOLS__
 COMMANDS = __COMMANDS__
 SCRATCH = __SCRATCH__
 
+# A cp1252 console cannot print Turkish probe output: measured 12 Oct 2026,
+# ACCEPT.py died with UnicodeEncodeError on a probe's "ı", and the worker
+# cannot set PYTHONIOENCODING itself (the approval filter declines it), so it
+# stopped. The children get the same through child_env.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 task = Path(__file__).resolve().parent
 lane = task.parents[1]
 failures = []
@@ -533,6 +541,8 @@ def child_env(**extra):
     for key in ("TEMP", "TMP", "TMPDIR"):
         env[key] = str(scratch)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     # pytest splits PYTEST_ADDOPTS POSIX-style, where a backslash is an escape:
     # the path goes in with forward slashes, quoted in case it has spaces.
     opts = "-p no:cacheprovider --basetemp=" + shlex.quote((scratch / "pytest").as_posix())
