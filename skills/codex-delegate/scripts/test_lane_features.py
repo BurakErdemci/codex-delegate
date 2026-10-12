@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -207,6 +208,110 @@ def lint_cases(tmp: Path) -> None:
           buf.getvalue())
 
 
+def marker_cases(tmp: Path) -> None:
+    """Probes run only before the first dispatch; the marker lives under home, outside the lane."""
+    home = tmp / "marker-home"
+    home.mkdir()
+    saved = {key: os.environ.get(key) for key in ("HOME", "USERPROFILE", "SERIT_TEST_SECRET")}
+    os.environ["HOME"] = os.environ["USERPROFILE"] = str(home)
+    try:
+        lane = git_repo(tmp / "markerlane")
+        (lane / "src").mkdir()
+        (lane / "src" / "old.py").write_text("x = 1\n", encoding="utf-8")
+        commit_all(lane)
+        td = lane / ".delegate-runs" / "t1"
+        probes = td / "probes"
+        probes.mkdir(parents=True)
+        (td / "SPEC.md").write_text("# TASK t1\n## GOAL\nCheck the dispatch marker.\n", encoding="utf-8")
+        (td / "lane.json").write_text(json.dumps({"mode": "worker"}), encoding="utf-8")
+
+        dspec = importlib.util.spec_from_file_location("dispatch_for_marker", HERE / "dispatch.py")
+        dp = importlib.util.module_from_spec(dspec)
+        dspec.loader.exec_module(dp)
+        shouting = Path(str(lane).upper() if os.name == "nt" else str(lane))
+        check("marker path is identical in new-lane.py and dispatch.py, case-blind on nt",
+              nl.dispatch_marker(lane) == dp.dispatch_marker(lane) == nl.dispatch_marker(shouting)
+              == dp.dispatch_marker(shouting) and home in nl.dispatch_marker(lane).parents,
+              f"{nl.dispatch_marker(lane)} {dp.dispatch_marker(lane)}")
+
+        ran = tmp / "marker-ran"
+        (probes / "marker.py").write_text(
+            f"from pathlib import Path\nPath({str(ran)!r}).write_text('ran')\n", encoding="utf-8")
+        nl.lint_lane(lane, "t1", 10)
+        check("marker absent: the probe runs during lint", ran.is_file())
+
+        ran.unlink()
+        marker = nl.dispatch_marker(lane)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("dispatched\n", encoding="utf-8")
+        (probes / "crash.py").write_text('import json\njson.loads("<html>")\n', encoding="utf-8")
+        problems, notes = nl.lint_lane(lane, "t1", 10)
+        check("marker present: no probe runs and the note says why",
+              not ran.exists() and any("probes not run" in n and "already been dispatched" in n for n in notes),
+              "\n".join(problems + notes))
+        check("marker present: a crashing probe yields no problem and no crash note",
+              not problems and not any("crashed" in n or "rc=" in n for n in notes), "\n".join(problems + notes))
+
+        (td / "SPEC.md").write_text("# TASK t1\n## FORBIDDEN\n- No file deletion\n", encoding="utf-8")
+        (probes / "gone.py").write_text(
+            'import os, sys\nfrom pathlib import Path\nroot = Path(os.environ["AUDIT_ROOT"])\n'
+            'sys.exit(0 if not (root / "src" / "old.py").exists() else 1)\n', encoding="utf-8")
+        problems, notes = nl.lint_lane(lane, "t1", 10)
+        check("marker present: the gone-check still reports a problem",
+              any("gone.py" in p and "src/old.py" in p for p in problems), "\n".join(problems + notes))
+
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            nl.drop_dispatch_marker(lane)
+        check("drop_dispatch_marker removes the marker and says so",
+              not marker.exists() and "removed dispatch marker" in buf.getvalue(), buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            nl.drop_dispatch_marker(lane)
+        check("drop_dispatch_marker is silent when there is no marker", buf.getvalue() == "", buf.getvalue())
+
+        for name in ("crash.py", "gone.py", "marker.py"):
+            (probes / name).unlink()
+        os.environ["SERIT_TEST_SECRET"] = "x"
+        (probes / "environment.py").write_text(
+            'import os, sys\nsys.exit(0 if "SERIT_TEST_SECRET" not in os.environ '
+            'and "PATH" in os.environ else 1)\n', encoding="utf-8")
+        problems, notes = nl.lint_lane(lane, "t1", 10)
+        check("environment omits SERIT_TEST_SECRET and keeps PATH",
+              not problems and any("environment.py: rc=0" in n for n in notes), "\n".join(problems + notes))
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    if os.name == "nt":
+        check("accept root rejects non-private POSIX mode", True, "skipped on nt")
+        check("accept root allows private POSIX mode", True, "skipped on nt")
+    else:
+        tempdir = tempfile.tempdir
+        isolated = tmp / "private-root"
+        isolated.mkdir()
+        root = isolated / "serit-accept"
+        root.mkdir(mode=0o777)
+        root.chmod(0o777)
+        try:
+            tempfile.tempdir = str(isolated)
+            try:
+                nl.accept_scratch("x")
+                refused = False
+            except SystemExit as exc:
+                refused = "not a private directory" in str(exc)
+            check("accept root rejects non-private POSIX mode", refused)
+            root.chmod(0o700)
+            check("accept root allows private POSIX mode", nl.accept_scratch("x") == root / "x")
+        finally:
+            tempfile.tempdir = tempdir
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         accept_unicode(Path(tmp))
@@ -214,6 +319,7 @@ def main() -> int:
         port_cases(Path(tmp))
         heuristic_cases()
         lint_cases(Path(tmp))
+        marker_cases(Path(tmp))
     failed = [n for n, ok, _ in results if not ok]
     print(f"\n{len(results) - len(failed)}/{len(results)} cases hold")
     return 1 if failed else 0

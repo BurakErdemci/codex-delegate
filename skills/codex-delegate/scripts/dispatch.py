@@ -66,6 +66,7 @@ if sys.version_info < (3, 11):
     raise SystemExit(3)
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -585,6 +586,14 @@ def approval_decision(method: str, params: dict, lane_root: Path, *,
     return "decline", f"unhandled approval method {method}"
 
 
+def dispatch_marker(lane: Path) -> Path:
+    """Home is outside the lane and the worker's writable roots; the path comes from the lane path only, never lane.json."""
+    key = str(Path(lane).resolve())
+    if os.name == "nt":
+        key = key.casefold()
+    return Path.home() / ".codex-delegate" / "dispatched" / hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
 class DispatchError(RuntimeError):
     pass
 
@@ -1100,6 +1109,18 @@ def run(args: argparse.Namespace) -> int:
                   f"mcp={granted or 'none'} sandbox={args.sandbox} "
                   f"config={args.config or 'none'} =====\n")
         log.flush()
+        marker = dispatch_marker(args.repo)
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
+        except OSError as exc:
+            msg = f"cannot record the dispatch marker {marker}: {exc}"
+            log.write(f"[fatal] {msg}\n")
+            verdict_line = "--- dispatch: FAILED ---"
+            final_path.write_text(f"DISPATCH FAILED: {msg}\n{verdict_line}\n", encoding="utf-8")
+            print(verdict_line)
+            print(f"ERROR: {msg}", file=sys.stderr)
+            return 1
         try:
             server = AppServer(args.codex_home, args.repo, log, args.effort,
                                overrides=args.config, timeout=args.timeout)

@@ -116,6 +116,24 @@ def main_repo_of(lane: Path) -> Path:
     return common.parent
 
 
+def dispatch_marker(lane: Path) -> Path:
+    """Home is outside the lane and the worker's writable roots; the path comes from the lane path only, never lane.json."""
+    key = str(Path(lane).resolve())
+    if os.name == "nt":
+        key = key.casefold()
+    return Path.home() / ".codex-delegate" / "dispatched" / hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
+def drop_dispatch_marker(lane: Path) -> None:
+    marker = dispatch_marker(lane)
+    try:
+        if marker.exists():
+            marker.unlink()
+            print(f"removed dispatch marker {marker}")
+    except OSError:
+        print(f"WARNING: could not remove dispatch marker {marker}")
+
+
 def is_linked_worktree(path: Path) -> bool:
     return repo_root(path) != main_repo_of(path)
 
@@ -268,6 +286,7 @@ def close_leftover(path: Path, given: Path | None, task_id: str | None,
     verify_sources(repo, load_config(repo)["links"])
     if task_id is not None:
         drop_accept_scratch(repo / ".delegate-runs" / "ARCHIVE" / task_id, task_id)
+        drop_dispatch_marker(path)
     if task_id is not None and not no_untrust:
         untrust(path)
     return 0
@@ -439,6 +458,7 @@ ACCEPT_TMP_ROOT = "serit-accept"
 def accept_scratch(task_id: str) -> Path:
     """The per-task temp dir for ACCEPT.py's children and the pytest bridge.
 
+    A shared POSIX temp root must not let another user redirect lint's writes.
     Outside the lane on purpose. It lived in the lane's tmp/ first, and then
     every child's tmp_path sat inside a git worktree - and, for a Unity repo,
     inside a Unity project. Measured 11 Oct 2026 (lane
@@ -491,7 +511,6 @@ def write_pytest_bridge(td: Path, py: Path | None, scratch: Path) -> list[str]:
 
 
 def drop_accept_scratch(td: Path | None, task_id: str) -> None:
-    A shared POSIX temp root must not let another user redirect lint's writes.
     """Remove the lane's outside-the-repo ACCEPT temp dir, if it is still there.
 
     The path is recomputed from the task id, never read from lane.json: the
@@ -901,6 +920,16 @@ def probe_crash(output: str) -> str | None:
     return None
 
 
+PROBE_ENV_KEYS = {
+    "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC",
+    "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
+    "COMMONPROGRAMFILES", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+    "OS", "USERNAME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "TZ", "VIRTUAL_ENV", "NODE_PATH",
+}
+
+
 def lint_lane(lane: Path, task_id: str, timeout: float) -> tuple[list[str], list[str]]:
     """(problems, notes) for the probes of a lane about to be dispatched.
 
@@ -935,15 +964,24 @@ def lint_lane(lane: Path, task_id: str, timeout: float) -> tuple[list[str], list
                     "then `git rm` them in the lane) or delete them in the lane yourself before dispatch.")
     record = read_record(td)
     py = td / ("py.cmd" if os.name == "nt" else "py.sh")
+    marker = dispatch_marker(lane)
+    if marker.exists():
+        notes.append(f"probes not run: a worker has already been dispatched into this lane (marker {marker}); "
+                     "lint runs probes only before the first dispatch, because after it anything run in the "
+                     "lane can reach worker-written code")
+        probes_to_run = []
+    else:
+        probes_to_run = probes
     scratch = accept_scratch(task_id).parent / (task_id + "-lint")
     shutil.rmtree(scratch, ignore_errors=True)
     scratch.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, AUDIT_ROOT=str(lane), TEMP=str(scratch), TMP=str(scratch), TMPDIR=str(scratch),
+    env = {key: value for key, value in os.environ.items() if key.upper() in PROBE_ENV_KEYS}
+    env.update(AUDIT_ROOT=str(lane), TEMP=str(scratch), TMP=str(scratch), TMPDIR=str(scratch),
                PYTHONDONTWRITEBYTECODE="1", PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
     if isinstance(record.get("port_base"), int) and isinstance(record.get("port_count"), int):
         env["PROBE_PORT_BASE"], env["PROBE_PORT_COUNT"] = str(record["port_base"]), str(record["port_count"])
     try:
-        for probe in probes:
+        for probe in probes_to_run:
             argv = ([str(py) if py.is_file() else sys.executable, str(probe)] if probe.suffix == ".py"
                     else ["node", str(probe)])
             kwargs = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
@@ -1622,6 +1660,7 @@ def cmd_close(args: argparse.Namespace) -> int:
     if remove_worktree(repo, lane):
         return 1
     drop_accept_scratch(archive, args.task_id)
+    drop_dispatch_marker(lane)
     if not args.no_untrust:
         untrust(lane)
     return 0
@@ -1862,6 +1901,7 @@ def cmd_blind_close(args: argparse.Namespace) -> int:
         return link_block(wt, left)
     if remove_worktree(main, wt):
         return 1
+    drop_dispatch_marker(wt)
     verify_sources(main, rels)
     return 0
 
