@@ -301,6 +301,14 @@ dispatch line once clean; `--override` prints it anyway, `--report-only` never
 does (exit 3 = problems), and `open`/`turn --no-lint` skip it (serit runs
 `lint` itself once inputs/ and prior-probes/ are in place).
 
+The lint runs probes only before the first dispatch. `dispatch.py` writes a
+marker under `~/.codex-delegate/dispatched/` (keyed by the lane path, outside
+the worker's writable roots) before Codex starts; while it exists the lint runs
+no probe and says so, because after a worker turn anything run in the lane can
+reach worker-written code on the host. `close` and `blind-close` remove it.
+Probes get an allowlisted environment (`PROBE_ENV_KEYS`), not the architect's
+full one.
+
 **Codex cannot delete files: the architect deletes before dispatch.** Its
 sandbox refuses (apply_patch "Failed to delete file"), and a spec that also
 says "No file deletion" turns a probe needing two files gone into two wasted
