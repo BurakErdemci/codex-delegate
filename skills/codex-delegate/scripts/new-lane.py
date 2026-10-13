@@ -286,7 +286,7 @@ def close_leftover(path: Path, given: Path | None, task_id: str | None,
     verify_sources(repo, load_config(repo)["links"])
     if task_id is not None:
         drop_accept_scratch(repo / ".delegate-runs" / "ARCHIVE" / task_id, task_id)
-        drop_dispatch_marker(path)
+    drop_dispatch_marker(path)
     if task_id is not None and not no_untrust:
         untrust(path)
     return 0
@@ -968,7 +968,7 @@ def lint_lane(lane: Path, task_id: str, timeout: float) -> tuple[list[str], list
     if marker.exists():
         notes.append(f"probes not run: a worker has already been dispatched into this lane (marker {marker}); "
                      "lint runs probes only before the first dispatch, because after it anything run in the "
-                     "lane can reach worker-written code")
+                     "lane can reach worker-written code. If this lane was recreated without `close`, delete the marker file")
         probes_to_run = []
     else:
         probes_to_run = probes
