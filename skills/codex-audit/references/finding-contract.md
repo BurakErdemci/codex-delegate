@@ -253,6 +253,16 @@ Do not chase it, do not drop it: where, what, one line on why it looks real.
 No probe required - it enters the next brief's scope instead of dying in your
 context.
 
+**Exception - the `adjacent` lens chases.** Its scope *is* the code around the
+change. Anything there that looks medium or higher gets a probe and a finding,
+not an `out of scope` line. A number you measured that has no upper bound (a
+table that grows per distinct input, a size without a cap) is a finding to
+weigh, not a coverage note. Measured 19 Oct 2026, four audit pairs: under the
+"do not chase" rule a worker wrote an exposure it had seen into `out of scope`,
+and another measured 1000 entries surviving with no cap and filed it as
+coverage - the blind auditor reported both as medium, and both were real. With
+the lens chasing, 3 of 3 audits found a real adjacent bug.
+
 Two measurements shaped this section. Narrow-brief agents surfaced serious
 out-of-scope findings spontaneously - one was the worst flaw of its run. But
 when the same thing was offered as a standalone optional heading it was used
