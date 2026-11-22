@@ -516,7 +516,7 @@ tier you picked - the cap is half the rule, not a footnote to it.
 | Lane difficulty | Model | Effort | Parallel lanes |
 |---|---|---|---|
 | **Basic** - writing or reviewing code that rides an existing pattern end to end | `gpt-6-luna` | `max` | as many as the work decomposes into; cost places no cap here |
-| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6.1-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
+| **Middling** - work that pushes back, ordinary review of real logic | `gpt-6.2-sol` | `high` when it is the only sol lane, `medium` as soon as a second one opens | **max 3** |
 | **Hardest** - a NARROW job at the top of the difficulty scale whose defect would be the most critical: core seams, silent data loss, an authorization boundary | `gpt-6-astra` | `medium` | **1**, unless the user says otherwise |
 
 (Tiering set by Burak, 5 Sep 2026; it supersedes the earlier two-tier rule of
