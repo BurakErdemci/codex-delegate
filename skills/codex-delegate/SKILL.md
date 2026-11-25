@@ -670,7 +670,25 @@ means the turn never completed") predates exit 5 and would have you discard a
 finished turn; the grep for `^\[decline\]` in RAW_OUTPUT.log tells you what it
 was denied.
 
-**A request the filter would decline is asked first.** dispatch.py writes the
+**Two approval modes; `--approvals open` is the default.** Owner decision (25
+Nov 2026): a Codex worker gets the same rights as Claude's own sub-agents,
+which run as the user with no command filter.
+- `open`: every command, file change and permission request is approved, in
+  the lane or not, except a short list of hard-to-undo accidents that go to
+  `[ask]`: `git push` in any form (`--force`, `--force-with-lease` included);
+  `git reset --hard`, `git clean -f`, `git checkout -- .` or `git restore` on a
+  repo that may not be the lane; recursive deletes (`rm -r`, `Remove-Item
+  -Recurse`, `rd /s`, `rmdir /s`, `del /s`) whose target is not a literal path
+  inside the lane; any write or delete naming `.unity_architect_ai`,
+  `.kimi-code`, `.cursor`, `.codex` or `.claude`. The list guards against
+  accidents; it is **not** a security boundary, and a worker that wants to get
+  around it can.
+- `strict`: the lexical lane-containment filter and fail-closed write gate
+  described below; whatever they reject goes to `[ask]`.
+
+Exit `5` means, in either mode, that something was actually declined.
+
+**A request the mode holds back is asked first.** dispatch.py writes the
 request (method, reason, command or paths, cwd, a one-time nonce) to a
 **private folder outside the lane** - `%LOCALAPPDATA%\codex-delegate\runs\<run-id>\approvals\`
 on Windows, `~/.local/state/codex-delegate/runs/<run-id>/approvals/` on POSIX
@@ -698,29 +716,30 @@ itself has no reason field). No answer within `--ask-timeout` seconds (default
 600; codex-cli 0.171.0 held an unanswered approval 904 s with no limit of its
 own) declines - waiting never approves; `--ask-timeout 0` restores the
 immediate decline. Requests you approve do not count toward exit `5`; the
-verdict line reports them as `(n approved by architect)`. The filter is
-lexical: read-only regex searches, PowerShell `$(...)` and every shell write it
-cannot model (any variable, `cd`, computed path, pipeline-fed target, nested
-shell, inline `python -c` that writes, encoded script) come to you instead of
-being auto-approved. A detached lane needs its stdout in a file you watch, or a
+verdict line reports them as `(n approved by architect)`. In `strict` the
+filter is lexical: read-only regex searches, PowerShell `$(...)` and every shell
+write it cannot model (any variable, `cd`, computed path, pipeline-fed target,
+nested shell, inline `python -c` that writes, encoded script) come to you
+instead of being auto-approved; in `open` only the list above does. A detached lane needs its stdout in a file you watch, or a
 poll on the printed approvals folder.
 
-**What `[ask]` guarantees on Windows - and what it does not.** Measured 25 Nov
+**What `[ask]` guarantees on Windows - and what it does not** (both modes). Measured 25 Nov
 2026 (codex-cli 0.171.0, worker home `~/.codex-worker`): the sandbox log says
 `Windows sandbox selection: disabled`; every shell command asks for approval
 before it runs; an approved command runs with your full user token (its groups
-did not include `CodexSandboxUsers`) and wrote to `%LOCALAPPDATA%`. So the
-approval filter is the only boundary, and:
+did not include `CodexSandboxUsers`) and wrote to `%LOCALAPPDATA%`. In `open`
+that is the intended level of trust; in `strict` the approval filter is the only
+boundary. Either way:
 - Guaranteed: nothing is approved by waiting, a decision file in the lane is
   never read, a decision without the request's nonce is ignored, and you see
   the whole command, escaped, before you decide.
-- Not guaranteed: a worker that gets ANY write auto-approved can write
-  anywhere you can - a script file in the lane, then `python script.py`, is a
-  read-only-looking command the filter approves. It can then read the nonce and
-  write the decision file itself. Against a hostile worker the channel is only
-  as strong as the filter, and the filter is lexical. An OS sandbox for the
-  worker home is the real fix; a deny ACE for `CodexSandboxUsers` on the private
-  root was not added, because measured commands do not carry that group.
+- Not guaranteed: a worker that gets ANY write approved can write anywhere you
+  can - in `open` by design, in `strict` through a script file in the lane run
+  as `python script.py`, which the filter approves. It can then read the nonce
+  and write the decision file itself. `[ask]` protects against accidents and a
+  confused worker, not against a hostile one. (A deny ACE for
+  `CodexSandboxUsers` on the private root was not added: measured commands do
+  not carry that group. OS sandboxing is out of scope by owner decision.)
 
 **Ask the worker why, after the turn.** `python dispatch.py --ask <task-dir>
 "why did you skip the probe?"` resumes the lane's last thread for one read-only
