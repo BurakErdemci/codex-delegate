@@ -657,7 +657,7 @@ its own case, not as one more failure:
 | exit | what happened | FINAL.txt holds |
 |---|---|---|
 | `0` | turn completed, nothing declined | the worker's report |
-| `5` | turn completed, but approvals were **declined** - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
+| `5` | turn completed, but approvals were **declined** (by you, by `--ask-timeout`, or with asking off) - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
 | `1` | the turn failed, timed out, or the provider refused it | `DISPATCH FAILED: <reason>` - unless it died before the turn began (unreadable prompt file, no codex CLI), where there is no FINAL.txt and the reason is on stderr |
 | `2` `3` `4` | preflight: bad argument, **an ACCEPTANCE command the sandbox would decline** (§4's bridge bullet is the fix), toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
 
@@ -669,6 +669,32 @@ is whatever survived that. The blanket rule that used to sit here ("non-zero
 means the turn never completed") predates exit 5 and would have you discard a
 finished turn; the grep for `^\[decline\]` in RAW_OUTPUT.log tells you what it
 was denied.
+
+**A request the filter would decline is asked first.** dispatch.py writes
+`<task-dir>/approvals/<n>.json` (method, reason, command or paths, cwd) and
+prints one line to stdout and RAW_OUTPUT.log:
+
+    [ask] 3 absolute path outside lane: '\\(set\\(_own_ids\\': "...powershell.exe" -Command "rg -n ...
+
+Read the request and answer it while the worker waits:
+
+    python dispatch.py --decide <task-dir> 3 approve
+    python dispatch.py --decide <task-dir> 3 decline "use Select-String inside the lane"
+
+The note on a decline reaches the worker as a steer message (the approval reply
+itself has no reason field). No answer within `--ask-timeout` seconds (default
+600) declines, exactly as before - waiting never approves; `--ask-timeout 0`
+restores the immediate decline. Requests you approve do not count toward exit
+`5`; the verdict line reports them as `(n approved by architect)`. The filter is
+lexical and still declines read-only regex searches and PowerShell `$(...)`
+(measured 25 Nov 2026) - those are exactly what `[ask]` is for. A detached lane
+needs its stdout in a file you watch, or a poll on `approvals/*.json`.
+
+**Ask the worker why, after the turn.** `python dispatch.py --ask <task-dir>
+"why did you skip the probe?"` resumes the lane's last thread (id in
+`<task-dir>/THREAD.json`, falling back to RAW_OUTPUT.log) for one read-only turn
+with every approval declined, prints the answer and appends it to
+`<task-dir>/ASK.log`. It changes no lane file.
 
 **A provider can refuse a turn, and the refusal arrives as a completion.**
 `turn/completed` carries a `status` and, when it failed, `error.codexErrorInfo`.
