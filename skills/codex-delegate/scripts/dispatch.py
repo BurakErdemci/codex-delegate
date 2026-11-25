@@ -70,6 +70,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -606,24 +607,126 @@ def _write_atomic(path: Path, text: str) -> None:
     os.replace(tmp, path)
 
 
+# --- the architect's approval channel ----------------------------------------
+#
+# Requests and decisions live OUTSIDE every path the worker can write. The
+# first cut kept them in <task-dir>/approvals, inside the lane worktree, where
+# in-lane file writes are auto-approved - so the worker could write
+# `<n>.decision = approve` and approve its own declined request (found in
+# review). Three locks now: a dispatcher-private root, an index the lane cannot
+# redirect, and a per-request nonce only the request file carries.
+_RUN_ID = re.compile(r"^[0-9a-f]{16}$")
+
+
+def private_root() -> Path:
+    """Dispatcher-private state root; never inside a lane by construction.
+
+    CODEX_DELEGATE_STATE_DIR exists for tests. It is read from the
+    dispatcher's own environment, which the worker cannot change, and the
+    inside-the-lane refusal in open_private_run still applies to it.
+    """
+    override = os.environ.get("CODEX_DELEGATE_STATE_DIR")
+    if override:
+        return Path(override)
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "codex-delegate" / "runs"
+    base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(base) / "codex-delegate" / "runs"
+
+
+def _real(path: Path | str) -> str:
+    # normcase lower-cases on Windows, where NTFS compares case-insensitively.
+    return os.path.normcase(os.path.realpath(str(path)))
+
+
+def _within(child: Path | str, parent: Path | str) -> bool:
+    c, p = _real(child), _real(parent)
+    return c == p or c.startswith(p.rstrip("\\/") + os.sep)
+
+
+def _private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        # mkdir's mode is masked by umask and skips existing parents; chmod
+        # states it outright. On Windows %LOCALAPPDATA% is owner-only already.
+        os.chmod(path, 0o700)
+
+
+def _index_file(task_dir: Path) -> Path:
+    key = hashlib.sha256(_real(task_dir).encode("utf-8")).hexdigest()[:32]
+    return private_root() / "index" / f"{key}.json"
+
+
+def open_private_run(task_dir: Path, guarded: list[Path]) -> Path:
+    """Create this dispatch's private run folder (approvals/ inside) and index it.
+
+    Raises DispatchError when the private root resolves inside a guarded path
+    (the lane, the repo) - a channel the worker can write is no channel.
+    """
+    root = private_root()
+    for g in guarded:
+        if _within(root, g):
+            raise DispatchError(f"private state root {root} is inside {g}")
+    for d in (root, root / "index"):
+        _private_dir(d)
+    run_id = secrets.token_hex(8)
+    run_dir = root / run_id
+    _private_dir(run_dir)
+    _private_dir(run_dir / "approvals")
+    _write_atomic(_index_file(task_dir), json.dumps(
+        {"run_id": run_id, "task_dir": _real(task_dir)}, indent=2) + "\n")
+    return run_dir
+
+
+def find_private_run(task_dir: Path) -> Path | None:
+    """task_dir's latest private run folder, from the private index only -
+    nothing in the lane can point --decide or --ask elsewhere."""
+    try:
+        data = json.loads(_index_file(task_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    run_id = str(data.get("run_id", "")) if isinstance(data, dict) else ""
+    if not _RUN_ID.match(run_id) or data.get("task_dir") != _real(task_dir):
+        return None
+    run_dir = private_root() / run_id
+    return run_dir if run_dir.is_dir() and _within(run_dir, private_root()) else None
+
+
 def next_ask_number(approvals_dir: Path) -> int:
-    """1 + the highest request number already there, so rounds never reuse one."""
+    """1 + the highest request number already there."""
     taken = [int(p.stem) for p in approvals_dir.glob("*.json") if p.stem.isdigit()]
     return max(taken, default=0) + 1
 
 
-def read_decision(path: Path) -> tuple[str | None, str]:
-    """(approve|decline|None, note) from a decision file; None if unreadable."""
+def read_decision(path: Path, nonce: str, not_before: float) -> tuple[str | None, str, str]:
+    """(approve|decline|None, note, problem) from a decision file.
+
+    verdict None with a problem means: not a decision for this request, keep
+    waiting. A wrong or missing nonce, or a file older than the request, is
+    exactly what a forged or left-over decision looks like.
+    """
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        if path.stat().st_mtime < not_before:
+            return None, "", "decision file predates the request"
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except OSError:
-        return None, ""
-    verdict = lines[0].strip().lower() if lines else ""
-    note = lines[1].strip() if len(lines) > 1 else ""
-    return (verdict if verdict in ("approve", "decline") else None), note
+        return None, "", "unreadable decision file"
+    except ValueError:
+        return None, "", "decision file is not JSON"
+    if not isinstance(data, dict) or not secrets.compare_digest(str(data.get("nonce", "")), nonce):
+        return None, "", "decision nonce does not match the request"
+    verdict = str(data.get("verdict", "")).lower()
+    if verdict not in ("approve", "decline"):
+        return None, "", f"unknown verdict {verdict!r}"
+    return verdict, str(data.get("note") or ""), ""
 
 
-_THREAD_ID_IN_LOG = re.compile(r'"threadId": "([0-9A-Za-z-]+)"')
+# Codex thread ids are UUIDs (measured on 0.171.0: 01a2135b-c469-7583-a1fc-
+# 663c6c4b2f10). Anything else read back is refused, never passed on.
+_THREAD_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_THREAD_ID_IN_LOG = re.compile(
+    r'"threadId": "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"')
 
 ASK_PREAMBLE = (
     "The architect has a question about the work you just did in this thread. "
@@ -632,24 +735,29 @@ ASK_PREAMBLE = (
     "Question: ")
 
 
-def lane_thread(task_dir: Path) -> tuple[str | None, Path | None, Path | None]:
-    """(thread id, repo, codex home) of the task's last dispatch.
+def lane_thread(task_dir: Path) -> str | None:
+    """Thread id of task_dir's last dispatch, or None.
 
-    THREAD.json is written at thread/start. Runs dispatched before it existed
-    carry the id only in RAW_OUTPUT.log (approval and notification payloads),
-    so fall back to the last id there and to the <repo>/.delegate-runs/<task>
-    layout new-lane.py creates.
+    Read from the private run folder (thread.json, written at thread/start).
+    Never from the lane: a THREAD.json there is worker-writable, and the first
+    cut read repo and codex_home from it - a worker could point codex_home at
+    its own config (an MCP server command) and have the architect's --ask run
+    it outside the sandbox. Runs from before the private folder existed fall
+    back to RAW_OUTPUT.log, accepting only a UUID-shaped id and nothing else.
     """
-    meta = task_dir / "THREAD.json"
-    if meta.is_file():
-        data = json.loads(meta.read_text(encoding="utf-8"))
-        return (data.get("thread_id"), Path(data["repo"]) if data.get("repo") else None,
-                Path(data["codex_home"]) if data.get("codex_home") else None)
+    run_dir = find_private_run(task_dir)
+    if run_dir is not None:
+        try:
+            tid = str(json.loads((run_dir / "thread.json").read_text(encoding="utf-8"))
+                      .get("thread_id", ""))
+        except (OSError, ValueError, AttributeError):
+            tid = ""
+        if tid:
+            return tid if _THREAD_ID.match(tid) else None
     raw = task_dir / "RAW_OUTPUT.log"
     found = (_THREAD_ID_IN_LOG.findall(raw.read_text(encoding="utf-8", errors="replace"))
              if raw.is_file() else [])
-    repo = task_dir.parent.parent if task_dir.parent.name == ".delegate-runs" else None
-    return (found[-1] if found else None), repo, None
+    return found[-1] if found else None
 
 
 def ask_codex(argv: list[str]) -> int:
@@ -657,19 +765,21 @@ def ask_codex(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="dispatch.py --ask")
     ap.add_argument("task_dir", type=Path)
     ap.add_argument("question")
-    ap.add_argument("--codex-home", type=Path, default=None)
-    ap.add_argument("--repo", type=Path, default=None)
+    # The home comes from this flag or the default only - never from a file.
+    ap.add_argument("--codex-home", type=Path, default=Path.home() / ".codex-worker")
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args(argv)
-    thread_id, repo, home = lane_thread(args.task_dir)
-    repo = args.repo or repo
-    home = args.codex_home or home or Path.home() / ".codex-worker"
-    if not thread_id:
-        print(f"ERROR: no thread id for {args.task_dir} (no THREAD.json, none in RAW_OUTPUT.log)",
-              file=sys.stderr)
+    task_dir = Path(os.path.realpath(args.task_dir))
+    # The repo is the layout new-lane.py creates: <lane>/.delegate-runs/<task>.
+    if task_dir.parent.name != ".delegate-runs" or not task_dir.is_dir():
+        print(f"ERROR: {args.task_dir} is not <lane>/.delegate-runs/<task>; --ask derives the "
+              "lane from that layout and takes it from nowhere else", file=sys.stderr)
         return 2
-    if repo is None or not repo.is_dir():
-        print(f"ERROR: cannot tell the lane repo for {args.task_dir}; pass --repo", file=sys.stderr)
+    repo = task_dir.parent.parent
+    thread_id = lane_thread(task_dir)
+    if not thread_id:
+        print(f"ERROR: no valid thread id for {args.task_dir} (private run folder, then "
+              "RAW_OUTPUT.log; only a UUID-shaped id is accepted)", file=sys.stderr)
         return 2
     # The transcript stays out of the lane: the turn must change no lane
     # file, and ASK.log is the one record it adds.
@@ -678,7 +788,7 @@ def ask_codex(argv: list[str]) -> int:
         transcript = Path(log.name)
         server: AppServer | None = None
         try:
-            server = AppServer(home, repo, log, None, timeout=args.timeout)
+            server = AppServer(args.codex_home, repo, log, None, timeout=args.timeout)
             server.read_only = True
             server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.1.0"}})
             server.send({"method": "initialized"})
@@ -697,7 +807,7 @@ def ask_codex(argv: list[str]) -> int:
                 server.close()
     answer = server.final_text.strip() or "(no answer)"
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(args.task_dir / "ASK.log", "a", encoding="utf-8") as fh:
+    with open(task_dir / "ASK.log", "a", encoding="utf-8") as fh:
         fh.write(f"===== {stamp} thread={thread_id} declined={server.declined}\n"
                  f"Q: {args.question}\nA: {answer}\n\n")
     print(answer)
@@ -710,20 +820,22 @@ def decide(argv: list[str]) -> int:
     if len(argv) < 3 or argv[2] not in ("approve", "decline"):
         print("usage: dispatch.py --decide <task-dir> <n> approve|decline [note]", file=sys.stderr)
         return 2
-    adir = Path(argv[0]) / "approvals"
+    run_dir = find_private_run(Path(argv[0]))
     n, verdict, note = argv[1], argv[2], " ".join(argv[3:]).strip()
-    if not n.isdigit() or not (adir / f"{n}.json").is_file():
-        print(f"ERROR: no request {n!r} in {adir}", file=sys.stderr)
+    adir = run_dir / "approvals" if run_dir else None
+    if adir is None or not n.isdigit() or not (adir / f"{n}.json").is_file():
+        print(f"ERROR: no request {n!r} for {argv[0]} in the private approvals folder "
+              f"({adir or 'no dispatch indexed for this task dir'})", file=sys.stderr)
         return 2
     target = adir / f"{n}.decision"
     if target.exists():
         # The dispatcher may already have acted on the first answer; a second
         # one would rewrite history the log already recorded.
-        print(f"ERROR: {target} already exists: {target.read_text(encoding='utf-8').splitlines()[:1]}",
-              file=sys.stderr)
+        print(f"ERROR: {target} already exists", file=sys.stderr)
         return 2
-    _write_atomic(target, verdict + "\n" + (note.replace("\n", " ") + "\n" if note else ""))
     request = json.loads((adir / f"{n}.json").read_text(encoding="utf-8"))
+    _write_atomic(target, json.dumps({"verdict": verdict, "nonce": request.get("nonce", ""),
+                                      "note": note.replace("\n", " ")}) + "\n")
     print(f"ask {n} -> {verdict}" + (f" ({note})" if note else "") + f": {request.get('reason')}")
     return 0
 
@@ -849,6 +961,7 @@ class AppServer:
         # Requests the filter would decline go to the architect first (see
         # ask_architect); only these two attributes switch that on.
         self.task_dir: Path | None = None
+        self.run_dir: Path | None = None
         self.ask_timeout = 0
         self.architect_approved = 0
         self.ask_timeouts = 0
@@ -955,7 +1068,7 @@ class AppServer:
                 # would quietly hand back full machine access.
                 decision, reason = "decline", "outside-sandbox request"
             note = ""
-            if decision == "decline" and self.task_dir is not None and self.ask_timeout > 0:
+            if decision == "decline" and self.run_dir is not None and self.ask_timeout > 0:
                 decision, reason, note = self.ask_architect(method, params, reason)
             if decision == "approve":
                 self.log.write(f"[approve] {method}: {reason}: {json.dumps(params)[:200]}\n")
@@ -1016,11 +1129,18 @@ class AppServer:
         judgement replaces the guess. No answer inside ask_timeout declines,
         exactly as before; nothing is ever approved by waiting.
         """
-        assert self.task_dir is not None
-        adir = self.task_dir / "approvals"
-        adir.mkdir(parents=True, exist_ok=True)
+        assert self.run_dir is not None
+        adir = self.run_dir / "approvals"
         n = next_ask_number(adir)
+        decision_file = adir / f"{n}.decision"
+        try:
+            # A decision that exists before its request is not an answer to it.
+            decision_file.unlink(missing_ok=True)
+        except OSError as exc:
+            self.log.write(f"[ask-disabled] {n}: cannot clear a stale decision ({exc})\n")
+            return "decline", reason, ""
         item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        nonce = secrets.token_hex(16)
         request: dict[str, Any] = {"n": n, "method": method, "reason": reason}
         if method == "item/fileChange/requestApproval":
             request["paths"] = _collect_paths(params)
@@ -1031,25 +1151,33 @@ class AppServer:
             subject = command if isinstance(command, str) else " ".join(map(str, command or []))
         request["cwd"] = params.get("cwd") or item.get("cwd") or str(self.lane_root)
         request["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        _write_atomic(adir / f"{n}.json", json.dumps(request, indent=2) + "\n")
+        request["nonce"] = nonce
+        request_file = adir / f"{n}.json"
+        _write_atomic(request_file, json.dumps(request, indent=2) + "\n")
+        not_before = request_file.stat().st_mtime
         short = " ".join(subject.split())
         short = short if len(short) <= 160 else short[:157] + "..."
-        line = f"[ask] {n} {reason}: {short}"
+        line = f"[ask] {n} {reason}: {short}  (approvals: {adir})"
         self.log.write(line + "\n")
         self.log.flush()
         print(line, flush=True)
-        decision_file = adir / f"{n}.decision"
         deadline = time.monotonic() + self.ask_timeout
+        rejected = ""
         while time.monotonic() < deadline and not self.timed_out:
             if decision_file.is_file():
-                verdict, note = read_decision(decision_file)
-                self.log.write(f"[ask-answer] {n} {verdict or 'unreadable'}"
-                               + (f": {note}" if note else "") + "\n")
-                if verdict == "approve":
-                    self.architect_approved += 1
-                    return "approve", f"approved by architect (ask {n})", ""
-                why = "declined by architect" if verdict == "decline" else "unreadable decision file"
-                return "decline", f"{why} (ask {n}): {reason}", note
+                verdict, note, problem = read_decision(decision_file, nonce, not_before)
+                if verdict is None:
+                    if problem != rejected:
+                        # Logged once per kind; the wait goes on, so a forged
+                        # file can delay nothing beyond the timeout.
+                        self.log.write(f"[ask-ignored] {n}: {problem}\n")
+                        rejected = problem
+                else:
+                    self.log.write(f"[ask-answer] {n} {verdict}" + (f": {note}" if note else "") + "\n")
+                    if verdict == "approve":
+                        self.architect_approved += 1
+                        return "approve", f"approved by architect (ask {n})", ""
+                    return "decline", f"declined by architect (ask {n}): {reason}", note
             time.sleep(0.5)
         self.ask_timeouts += 1
         self.log.write(f"[ask-timeout] {n} no decision within {self.ask_timeout}s\n")
@@ -1395,6 +1523,13 @@ def run(args: argparse.Namespace) -> int:
         server.task_dir = task_dir
         server.ask_timeout = max(0, args.ask_timeout)
         try:
+            server.run_dir = open_private_run(task_dir, [args.repo, task_dir])
+        except (DispatchError, OSError) as exc:
+            # No private channel means no [ask] and no --ask metadata: the
+            # request declines at once, as before the [ask] flow existed.
+            log.write(f"[ask-disabled] {exc}; approvals the filter rejects decline immediately\n")
+            server.ask_timeout = 0
+        try:
             # Keep in step with .claude-plugin/plugin.json "version".
             server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.1.0"}})
             server.send({"method": "initialized"})
@@ -1416,9 +1551,10 @@ def run(args: argparse.Namespace) -> int:
                 raise DispatchError(f"thread/start returned no thread id: {thread}")
             # `--ask` resumes this thread later; the log alone carries the id
             # only inside approval payloads, which a quiet turn never has.
-            _write_atomic(task_dir / "THREAD.json", json.dumps(
-                {"thread_id": thread_id, "repo": str(args.repo),
-                 "codex_home": str(args.codex_home)}, indent=2) + "\n")
+            # Private run folder only: a lane copy would be worker-writable.
+            if server.run_dir is not None:
+                _write_atomic(server.run_dir / "thread.json",
+                              json.dumps({"thread_id": thread_id}) + "\n")
 
             server.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]})
 

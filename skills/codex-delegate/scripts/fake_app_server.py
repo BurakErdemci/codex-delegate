@@ -16,7 +16,8 @@ from pathlib import Path
 cfg = json.loads(Path(os.environ["FAKE_APP_SERVER_CFG"]).read_text(encoding="utf-8"))
 record = Path(cfg["record"])
 requests = list(cfg.get("requests", []))
-THREAD = cfg.get("thread_id", "thread-fake-1")
+# UUID-shaped like a real Codex thread id: --ask refuses anything else.
+THREAD = cfg.get("thread_id", "0aaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeee1")
 TURN = "turn-fake-1"
 
 
@@ -30,6 +31,8 @@ def note(obj):
         fh.write(json.dumps(obj) + "\n")
 
 
+# Which home and cwd the dispatcher really started us with.
+note({"in": {"_env": {"CODEX_HOME": os.environ.get("CODEX_HOME"), "cwd": os.getcwd()}}})
 pending = None          # id of the approval request awaiting a reply
 turn_text = ""
 next_id = 1000

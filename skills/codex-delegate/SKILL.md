@@ -670,16 +670,26 @@ means the turn never completed") predates exit 5 and would have you discard a
 finished turn; the grep for `^\[decline\]` in RAW_OUTPUT.log tells you what it
 was denied.
 
-**A request the filter would decline is asked first.** dispatch.py writes
-`<task-dir>/approvals/<n>.json` (method, reason, command or paths, cwd) and
-prints one line to stdout and RAW_OUTPUT.log:
+**A request the filter would decline is asked first.** dispatch.py writes the
+request (method, reason, command or paths, cwd, a one-time nonce) to a
+**private folder outside the lane** - `%LOCALAPPDATA%\codex-delegate\runs\<run-id>\approvals\`
+on Windows, `~/.local/state/codex-delegate/runs/<run-id>/approvals/` on POSIX
+(owner-only) - and prints one line to stdout and RAW_OUTPUT.log naming it:
 
-    [ask] 3 absolute path outside lane: '\\(set\\(_own_ids\\': "...powershell.exe" -Command "rg -n ...
+    [ask] 3 absolute path outside lane: '\\(set\\(_own_ids\\': "...powershell.exe" -Command "rg -n ...  (approvals: C:\Users\...\runs\9f3c...\approvals)
 
 Read the request and answer it while the worker waits:
 
     python dispatch.py --decide <task-dir> 3 approve
     python dispatch.py --decide <task-dir> 3 decline "use Select-String inside the lane"
+
+`--decide` finds the folder through a private index keyed by the task dir, and
+copies the request's nonce into the answer. Answer only through it: a decision
+without that nonce, or older than its request, is ignored, and nothing in the
+lane is ever read as an answer - the worker can write the lane, so a channel
+there would let it approve itself. If the private root would resolve inside
+the lane, `[ask]` is off for the run (`[ask-disabled]` in the log) and declines
+are immediate.
 
 The note on a decline reaches the worker as a steer message (the approval reply
 itself has no reason field). No answer within `--ask-timeout` seconds (default
@@ -688,13 +698,16 @@ restores the immediate decline. Requests you approve do not count toward exit
 `5`; the verdict line reports them as `(n approved by architect)`. The filter is
 lexical and still declines read-only regex searches and PowerShell `$(...)`
 (measured 25 Nov 2026) - those are exactly what `[ask]` is for. A detached lane
-needs its stdout in a file you watch, or a poll on `approvals/*.json`.
+needs its stdout in a file you watch, or a poll on the printed approvals folder.
 
 **Ask the worker why, after the turn.** `python dispatch.py --ask <task-dir>
-"why did you skip the probe?"` resumes the lane's last thread (id in
-`<task-dir>/THREAD.json`, falling back to RAW_OUTPUT.log) for one read-only turn
-with every approval declined, prints the answer and appends it to
-`<task-dir>/ASK.log`. It changes no lane file.
+"why did you skip the probe?"` resumes the lane's last thread for one read-only
+turn with every approval declined, prints the answer and appends it to
+`<task-dir>/ASK.log`. It changes no lane file. The thread id comes from the
+private run folder (older runs: the last UUID in RAW_OUTPUT.log), the lane from
+the `<lane>/.delegate-runs/<task>` layout, and the Codex home only from
+`--codex-home` or the default `~/.codex-worker` - never from a file the worker
+could have written.
 
 **A provider can refuse a turn, and the refusal arrives as a completion.**
 `turn/completed` carries a `status` and, when it failed, `error.codexErrorInfo`.
