@@ -657,7 +657,7 @@ its own case, not as one more failure:
 | exit | what happened | FINAL.txt holds |
 |---|---|---|
 | `0` | turn completed, nothing declined | the worker's report |
-| `5` | turn completed, but approvals were **declined** (by you, by `--ask-timeout`, or with asking off) - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) ---` |
+| `5` | turn completed, but approvals were **declined** (by you, by `--ask-timeout`, or with asking off) - the worker was starved, not refused | a real report, ending `--- dispatch: BLOCKED-BY-APPROVALS (n approvals declined) [approvals=open] ---` |
 | `1` | the turn failed, timed out, or the provider refused it | `DISPATCH FAILED: <reason>` - unless it died before the turn began (unreadable prompt file, no codex CLI), where there is no FINAL.txt and the reason is on stderr |
 | `2` `3` `4` | preflight: bad argument, **an ACCEPTANCE command the sandbox would decline** (§4's bridge bullet is the fix), toolchain too old, unregistered MCP server | the turn never started. A rejected *argument* dies before FINAL.txt is touched, so last round's report may still be sitting there - trust the DONE marker's `verdict=NO-TURN`, not the file |
 
@@ -686,7 +686,9 @@ which run as the user with no command filter.
 - `strict`: the lexical lane-containment filter and fail-closed write gate
   described below; whatever they reject goes to `[ask]`.
 
-Exit `5` means, in either mode, that something was actually declined.
+Exit `5` means, in either mode, that something was actually declined. Every
+dispatch prints its mode first (`[approvals] open (default)` or `[approvals] strict`,
+stdout and RAW_OUTPUT.log) and ends its verdict line with `[approvals=<mode>]`.
 
 **A request the mode holds back is asked first.** dispatch.py writes the
 request (method, reason, command or paths, cwd, a one-time nonce) to a
