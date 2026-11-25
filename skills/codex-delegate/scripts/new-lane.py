@@ -1614,11 +1614,12 @@ def cmd_close(args: argparse.Namespace) -> int:
     if raw.is_file():
         # The full transcript is too big to keep and dies with the worktree,
         # but two parts of it are verdict evidence elsewhere in the protocol:
-        # the [decline]/[approve] lines (what exit 5 actually means for this
+        # the [decline]/[approve]/[ask] lines (what exit 5 actually means for this
         # lane) and the tail (why a zero-findings lane returned nothing). Keep
         # a bounded slice rather than losing the answer to both questions.
         lines = raw.read_text(encoding="utf-8", errors="replace").splitlines()
-        marked = [ln for ln in lines if ln.startswith(("[decline]", "[approve]"))]
+        # [ask...] lines record what the architect was asked and answered.
+        marked = [ln for ln in lines if ln.startswith(("[decline]", "[approve]", "[ask"))]
         slice_ = marked + ["", f"--- last 200 of {len(lines)} lines ---"] + lines[-200:]
         (archive / "RAW_OUTPUT.tail.log").write_text("\n".join(slice_) + "\n",
                                                      encoding="utf-8")

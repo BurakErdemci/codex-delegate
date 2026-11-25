@@ -598,6 +598,53 @@ class DispatchError(RuntimeError):
     pass
 
 
+def _write_atomic(path: Path, text: str) -> None:
+    # A poller that reads a half-written request or decision acts on garbage.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def next_ask_number(approvals_dir: Path) -> int:
+    """1 + the highest request number already there, so rounds never reuse one."""
+    taken = [int(p.stem) for p in approvals_dir.glob("*.json") if p.stem.isdigit()]
+    return max(taken, default=0) + 1
+
+
+def read_decision(path: Path) -> tuple[str | None, str]:
+    """(approve|decline|None, note) from a decision file; None if unreadable."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None, ""
+    verdict = lines[0].strip().lower() if lines else ""
+    note = lines[1].strip() if len(lines) > 1 else ""
+    return (verdict if verdict in ("approve", "decline") else None), note
+
+
+def decide(argv: list[str]) -> int:
+    """`--decide <task-dir> <n> approve|decline [note]`: answer one [ask]."""
+    if len(argv) < 3 or argv[2] not in ("approve", "decline"):
+        print("usage: dispatch.py --decide <task-dir> <n> approve|decline [note]", file=sys.stderr)
+        return 2
+    adir = Path(argv[0]) / "approvals"
+    n, verdict, note = argv[1], argv[2], " ".join(argv[3:]).strip()
+    if not n.isdigit() or not (adir / f"{n}.json").is_file():
+        print(f"ERROR: no request {n!r} in {adir}", file=sys.stderr)
+        return 2
+    target = adir / f"{n}.decision"
+    if target.exists():
+        # The dispatcher may already have acted on the first answer; a second
+        # one would rewrite history the log already recorded.
+        print(f"ERROR: {target} already exists: {target.read_text(encoding='utf-8').splitlines()[:1]}",
+              file=sys.stderr)
+        return 2
+    _write_atomic(target, verdict + "\n" + (note.replace("\n", " ") + "\n" if note else ""))
+    request = json.loads((adir / f"{n}.json").read_text(encoding="utf-8"))
+    print(f"ask {n} -> {verdict}" + (f" ({note})" if note else "") + f": {request.get('reason')}")
+    return 0
+
+
 def codex_path() -> str:
     """Absolute path to the codex CLI - never spawn it by bare name.
 
@@ -716,6 +763,12 @@ class AppServer:
         # the worker was starved" (see approval_decision and main()).
         self.lane_root = Path(cwd)
         self.declined = 0
+        # Requests the filter would decline go to the architect first (see
+        # ask_architect); only these two attributes switch that on.
+        self.task_dir: Path | None = None
+        self.ask_timeout = 0
+        self.architect_approved = 0
+        self.ask_timeouts = 0
         # fileChange approvals reference paths by itemId only; the items
         # themselves stream past earlier as notifications (see
         # enrich_file_change). One turn holds a handful of these.
@@ -780,6 +833,9 @@ class AppServer:
             self.approve(msg)
         elif method:
             self.note(method, msg.get("params") or {})
+        elif msg.get("error"):
+            # A reply to a fire-and-forget request (turn/steer) that failed.
+            self.log.write(f"[reply-error] {json.dumps(msg)[:400]}\n")
 
     def approve(self, msg: dict[str, Any]) -> None:
         rid, method = msg["id"], msg["method"]
@@ -804,6 +860,9 @@ class AppServer:
                 # and declining is the isolation guarantee. Auto-accepting
                 # would quietly hand back full machine access.
                 decision, reason = "decline", "outside-sandbox request"
+            note = ""
+            if decision == "decline" and self.task_dir is not None and self.ask_timeout > 0:
+                decision, reason, note = self.ask_architect(method, params, reason)
             if decision == "approve":
                 self.log.write(f"[approve] {method}: {reason}: {json.dumps(params)[:200]}\n")
             else:
@@ -828,6 +887,8 @@ class AppServer:
             # which is why declining ever worked.
             wire = "accept" if decision == "approve" else "decline"
             self.send({"id": rid, "result": {"decision": wire}})
+            if note:
+                self.steer_note(params, note)
         elif method == "item/tool/requestUserInput":
             # 0.145 expects an answer map keyed by question id:
             #   {"answers": {"<question-id>": {"answers": ["<text>"]}}}
@@ -848,6 +909,75 @@ class AppServer:
             # no timeout on the Codex side, so a silent skip here freezes the run.
             self.log.write(f"[auto-empty] unhandled server request {method}: {json.dumps(params)[:400]}\n")
             self.send({"id": rid, "result": {}})
+
+    def ask_architect(self, method: str, params: dict, reason: str) -> tuple[str, str, str]:
+        """Hand a request the filter would decline to the architect.
+
+        Returns (decision, reason, note). The lexical filter cannot parse every
+        shell: measured 25 Nov 2026, three read-only in-lane commands (an rg
+        regex, a PowerShell [regex]::Matches, a PowerShell $(...) next to a
+        plain `git status`) were declined and each cost a worker its checks.
+        Parsing command lines more cleverly was tried and rejected in review
+        (every parser disagrees with some shell), so a human-or-architect
+        judgement replaces the guess. No answer inside ask_timeout declines,
+        exactly as before; nothing is ever approved by waiting.
+        """
+        assert self.task_dir is not None
+        adir = self.task_dir / "approvals"
+        adir.mkdir(parents=True, exist_ok=True)
+        n = next_ask_number(adir)
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        request: dict[str, Any] = {"n": n, "method": method, "reason": reason}
+        if method == "item/fileChange/requestApproval":
+            request["paths"] = _collect_paths(params)
+            subject = " ".join(request["paths"])
+        else:
+            command = params.get("command") or item.get("command")
+            request["command"] = command
+            subject = command if isinstance(command, str) else " ".join(map(str, command or []))
+        request["cwd"] = params.get("cwd") or item.get("cwd") or str(self.lane_root)
+        request["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        _write_atomic(adir / f"{n}.json", json.dumps(request, indent=2) + "\n")
+        short = " ".join(subject.split())
+        short = short if len(short) <= 160 else short[:157] + "..."
+        line = f"[ask] {n} {reason}: {short}"
+        self.log.write(line + "\n")
+        self.log.flush()
+        print(line, flush=True)
+        decision_file = adir / f"{n}.decision"
+        deadline = time.monotonic() + self.ask_timeout
+        while time.monotonic() < deadline and not self.timed_out:
+            if decision_file.is_file():
+                verdict, note = read_decision(decision_file)
+                self.log.write(f"[ask-answer] {n} {verdict or 'unreadable'}"
+                               + (f": {note}" if note else "") + "\n")
+                if verdict == "approve":
+                    self.architect_approved += 1
+                    return "approve", f"approved by architect (ask {n})", ""
+                why = "declined by architect" if verdict == "decline" else "unreadable decision file"
+                return "decline", f"{why} (ask {n}): {reason}", note
+            time.sleep(0.5)
+        self.ask_timeouts += 1
+        self.log.write(f"[ask-timeout] {n} no decision within {self.ask_timeout}s\n")
+        return "decline", f"ask timeout after {self.ask_timeout}s (ask {n}): {reason}", ""
+
+    def steer_note(self, params: dict, note: str) -> None:
+        """Pass the architect's decline note to the worker.
+
+        The approval reply has no reason field (the 0.171 schema allows only a
+        decision), so the note travels as turn/steer input into the running
+        turn. Fire and forget: the reply is read by handle() like any other
+        stray response, and a refused steer only costs the note.
+        """
+        thread_id, turn_id = params.get("threadId"), params.get("turnId")
+        if not (thread_id and turn_id):
+            self.log.write("[ask-note] no threadId/turnId on the request; note not delivered\n")
+            return
+        self._next_id += 1
+        self.send({"id": self._next_id, "method": "turn/steer", "params": {
+            "threadId": thread_id, "expectedTurnId": turn_id,
+            "input": [{"type": "text", "text": f"The architect declined that request: {note}"}]}})
+        self.log.write(f"[ask-note] steered: {note}\n")
 
     def note(self, method: str, params: dict[str, Any]) -> None:
         # Capture fileChange items on the way past - their approval request
@@ -968,6 +1098,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "probably looking for is sandbox_workspace_write.network_access=true, "
                          "which lets the worker's shell reach the network while keeping the "
                          "filesystem sandbox. Keys that would disable the sandbox are refused.")
+    ap.add_argument("--ask-timeout", type=int, default=600, metavar="SECONDS",
+                    help="when the approval filter would decline a request, write "
+                         "<task-dir>/approvals/<n>.json, print `[ask] <n> ...` and wait this long "
+                         "for `dispatch.py --decide <task-dir> <n> approve|decline [note]`; "
+                         "no answer declines. 0 declines immediately, as before. "
+                         "Measured on codex-cli 0.171.0: app-server held an unanswered "
+                         "approval 904s with no timeout of its own and resumed on the reply, "
+                         "so the wait is bounded only by this and --timeout.")
     ap.add_argument("--done-file", type=Path, default=None, metavar="PATH",
                     help="write a completion marker here when the turn ends, however it ends "
                          "(rc=, verdict=, final=). Poll for this one file instead of building "
@@ -1131,6 +1269,8 @@ def run(args: argparse.Namespace) -> int:
             print(verdict_line)
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
+        server.task_dir = task_dir
+        server.ask_timeout = max(0, args.ask_timeout)
         try:
             # Keep in step with .claude-plugin/plugin.json "version".
             server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.1.0"}})
@@ -1212,8 +1352,13 @@ def run(args: argparse.Namespace) -> int:
             server.close()
 
     declines = server.declined
-    verdict = (f"BLOCKED-BY-APPROVALS ({declines} approvals declined)"
-               if declines else "OK")
+    verdict = (f"BLOCKED-BY-APPROVALS ({declines} approvals declined"
+               + (f", {server.ask_timeouts} by ask timeout" if server.ask_timeouts else "")
+               + ")" if declines else "OK")
+    if server.architect_approved:
+        # Approved by the architect is not a decline: the worker got what it
+        # asked for, so the exit code stays 0 unless something else was refused.
+        verdict += f" ({server.architect_approved} approved by architect)"
     verdict_line = f"--- dispatch: {verdict} ---"
     final_text = server.final_text or "(worker produced no final message)"
     # The verdict rides in FINAL.txt as well as stdout and the exit code: two
@@ -1253,6 +1398,15 @@ def peek_flag(argv: list[str], flag: str) -> str | None:
 
 def main() -> int:
     argv = sys.argv[1:]
+    # Worker text reaches stdout now ([ask] lines, --ask answers). On a cp1252
+    # console the first Turkish letter raised UnicodeEncodeError (measured
+    # 25 Nov 2026, 'İ'), which would kill a waiting lane mid-turn.
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
+    if argv[:1] == ["--decide"]:
+        return decide(argv[1:])
     try:
         args = build_parser().parse_args()
     except SystemExit as exc:
