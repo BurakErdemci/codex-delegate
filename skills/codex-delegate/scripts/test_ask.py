@@ -199,7 +199,7 @@ def main() -> int:
         final = (lane.task / "FINAL.txt").read_text(encoding="utf-8")
         checks += [
             ("no decision: each field command becomes [ask] 1..3, naming the private folder",
-             all(f"[ask] {n} " in out for n in (1, 2, 3)) and f"(approvals: {adir})" in out),
+             all(f"[ask] {n} " in out for n in (1, 2, 3)) and f"request {adir / '1.json'})" in out),
             ("the private approvals folder is outside the lane",
              not dsp._within(adir, lane.repo) and dsp._within(adir, lane.private)),
             ("nothing of the channel is written into the lane", not (lane.task / "approvals").exists()),
@@ -218,6 +218,39 @@ def main() -> int:
             checks.append(("the private run folder is owner-only (0o700)",
                            (adir.stat().st_mode & 0o777) == 0o700
                            and (adir.parent.stat().st_mode & 0o777) == 0o700))
+
+    # --- what the architect sees -------------------------------------------
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        tail = "&& del /q C:\\Users\\x\\Documents\\important.txt"
+        long_cmd = "echo " + "A" * (257 - len("echo  ") - len(tail)) + " " + tail
+        nasty = "echo hi\x1b[2K\x1b[1A\x08\x08 && type C:\\Users\\x\\secret.txt"
+        lane = Lane(root, [{"method": CMD, "params": {"command": long_cmd, "cwd": str(root / "lane")}},
+                           {"method": CMD, "params": {"command": nasty, "cwd": str(root / "lane")}}])
+        rc, out = lane.run("--ask-timeout", "1")
+        adir = lane.approvals()
+        shown = subprocess.run([sys.executable, str(DISPATCH), "--show", str(lane.task), "1"],
+                               capture_output=True, text=True, encoding="utf-8")
+        shown2 = subprocess.run([sys.executable, str(DISPATCH), "--show", str(lane.task), "2"],
+                                capture_output=True, text=True, encoding="utf-8")
+        decided = decide(lane.task, 1, "decline")
+        checks += [
+            ("a 257-char command is shown whole in [ask], harmful tail included, with its length",
+             len(long_cmd) == 257 and tail in out and "(257 chars; request" in out
+             and f"request {adir / '1.json'})" in out),
+            ("ESC and BS in a command come out escaped, never raw",
+             "\\x1b[2K" in out and "\\x08" in out and "\x1b" not in out and "\x08" not in out
+             and "\x1b" not in lane.log()),
+            ("--show prints the full request, escaped",
+             shown.returncode == 0 and tail in shown.stdout and "command (257 chars)" in shown.stdout
+             and "\\x1b" in shown2.stdout and "\x1b" not in shown2.stdout),
+            ("--show refuses an unknown request", subprocess.run(
+                [sys.executable, str(DISPATCH), "--show", str(lane.task), "9"],
+                capture_output=True).returncode == 2),
+            ("--decide prints the full request before writing the decision",
+             decided.returncode == 0 and tail in decided.stdout
+             and decided.stdout.index(tail) < decided.stdout.index("ask 1 -> decline")),
+        ]
 
     # --- forged decisions are ignored ----------------------------------------
     with tempfile.TemporaryDirectory() as tmp:

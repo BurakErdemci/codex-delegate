@@ -600,6 +600,60 @@ class DispatchError(RuntimeError):
     pass
 
 
+def shown(text: str, keep_newlines: bool = False) -> str:
+    """Worker-supplied text made safe to show a human: every control or
+    non-printable character (ESC, BS, CR, bidi overrides, zero-width marks)
+    becomes a visible \\xNN / \\uNNNN escape, so a request cannot repaint
+    the architect's terminal or hide part of itself. Newlines and tabs stay
+    real only when keep_newlines is set (multi-line answers)."""
+    out = []
+    for ch in str(text):
+        if keep_newlines and ch in "\n\t":
+            out.append(ch)
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch.isprintable():
+            out.append(ch)
+        else:
+            o = ord(ch)
+            out.append(f"\\x{o:02x}" if o < 0x100 else
+                       f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+    return "".join(out)
+
+
+def show_request(request_file: Path) -> str:
+    """The whole request, escaped - what the architect judges before deciding."""
+    req = json.loads(request_file.read_text(encoding="utf-8"))
+    if "paths" in req:
+        body = "\n".join(f"  path: {shown(p)}" for p in req.get("paths") or [])
+    else:
+        cmd = req.get("command")
+        text = cmd if isinstance(cmd, str) else " ".join(map(str, cmd or []))
+        body = f"  command ({len(text)} chars): {shown(text)}"
+    return (f"request {req.get('n')} ({request_file})\n"
+            f"  method: {shown(req.get('method', ''))}\n"
+            f"  reason: {shown(req.get('reason', ''))}\n"
+            f"  cwd: {shown(req.get('cwd', ''))}\n{body}\n"
+            f"  at: {shown(req.get('at', ''))}")
+
+
+def show(argv: list[str]) -> int:
+    """`--show <task-dir> <n>`: print one request in full, escaped."""
+    if len(argv) != 2 or not argv[1].isdigit():
+        print("usage: dispatch.py --show <task-dir> <n>", file=sys.stderr)
+        return 2
+    run_dir = find_private_run(Path(argv[0]))
+    request_file = run_dir / "approvals" / f"{argv[1]}.json" if run_dir else None
+    if request_file is None or not request_file.is_file():
+        print(f"ERROR: no request {argv[1]!r} for {argv[0]} in the private approvals folder",
+              file=sys.stderr)
+        return 2
+    print(show_request(request_file))
+    return 0
+
+
 def _write_atomic(path: Path, text: str) -> None:
     # A poller that reads a half-written request or decision acts on garbage.
     tmp = path.with_name(path.name + ".tmp")
@@ -855,9 +909,11 @@ def decide(argv: list[str]) -> int:
         print(f"ERROR: {target} already exists", file=sys.stderr)
         return 2
     request = json.loads((adir / f"{n}.json").read_text(encoding="utf-8"))
+    # What is being decided, in full, before the answer is written.
+    print(show_request(adir / f"{n}.json"))
     _write_atomic(target, json.dumps({"verdict": verdict, "nonce": request.get("nonce", ""),
                                       "note": note.replace("\n", " ")}) + "\n")
-    print(f"ask {n} -> {verdict}" + (f" ({note})" if note else "") + f": {request.get('reason')}")
+    print(f"ask {n} -> {verdict}" + (f" ({shown(note)})" if note else ""))
     return 0
 
 
@@ -1186,9 +1242,10 @@ class AppServer:
         request_file = adir / f"{n}.json"
         _write_atomic(request_file, json.dumps(request, indent=2) + "\n")
         not_before = request_file.stat().st_mtime
-        short = " ".join(subject.split())
-        short = short if len(short) <= 160 else short[:157] + "..."
-        line = f"[ask] {n} {reason}: {short}  (approvals: {adir})"
+        # The FULL command, escaped: a cut at 157 chars let a worker park the
+        # harmful part past it, and raw ESC/BS reached the terminal (audit).
+        line = (f"[ask] {n} {shown(reason)}: {shown(subject)}  "
+                f"({len(subject)} chars; request {request_file})")
         self.log.write(line + "\n")
         self.log.flush()
         print(line, flush=True)
@@ -1676,6 +1733,8 @@ def main() -> int:
         sys.stdout.reconfigure(errors="replace")
     except (AttributeError, ValueError):
         pass
+    if argv[:1] == ["--show"]:
+        return show(argv[1:])
     if argv[:1] == ["--decide"]:
         return decide(argv[1:])
     if argv[:1] == ["--ask"]:
