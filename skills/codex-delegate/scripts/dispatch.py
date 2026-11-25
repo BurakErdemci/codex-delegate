@@ -1276,6 +1276,9 @@ class AppServer:
         self.architect_approved = 0
         self.ask_timeouts = 0
         self.read_only = False
+        # run() sets the CLI's choice; "strict" here keeps any other caller on
+        # the containment filter unless it asks for open.
+        self.approvals_mode = "strict"
         # fileChange approvals reference paths by itemId only; the items
         # themselves stream past earlier as notifications (see
         # enrich_file_change). One turn holds a handful of these.
@@ -1363,13 +1366,17 @@ class AppServer:
             self.log.write(f"[approve] mcp permissions {json.dumps(params.get('permissions', {}))}\n")
             self.send({"id": rid, "result": {"permissions": params.get("permissions", {}), "scope": "turn"}})
         elif method in DECISION_APPROVALS:
-            if os.name == "nt":
+            if method == "item/fileChange/requestApproval":
+                params = enrich_file_change(params, self.file_changes)
+            if self.approvals_mode == "open":
+                # Same rights as Claude's own sub-agents, on every platform:
+                # only the hard-to-undo list is held back (see open_decision).
+                decision, reason = open_decision(method, params, self.lane_root)
+            elif os.name == "nt":
                 # No OS sandbox backs the worker here, so these requests are
                 # NOT escape attempts - Codex asks for anything it cannot prove
                 # safe, and blanket decline starved two lanes to zero artifacts
                 # (see the approval-decision block above for the measurement).
-                if method == "item/fileChange/requestApproval":
-                    params = enrich_file_change(params, self.file_changes)
                 decision, reason = approval_decision(method, params, self.lane_root)
             else:
                 # The POSIX sandbox already filtered workspace writes; a
@@ -1671,6 +1678,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "probably looking for is sandbox_workspace_write.network_access=true, "
                          "which lets the worker's shell reach the network while keeping the "
                          "filesystem sandbox. Keys that would disable the sandbox are refused.")
+    ap.add_argument("--approvals", choices=["open", "strict"], default="open",
+                    help="open (default): approve every request except a short list of "
+                         "hard-to-undo accidents (git push, discarding git work outside the "
+                         "lane, recursive deletes outside the lane, writes to live data "
+                         "folders), which go to [ask]. strict: the lexical lane-containment "
+                         "filter and fail-closed write gate; anything they reject goes to [ask].")
     ap.add_argument("--ask-timeout", type=int, default=600, metavar="SECONDS",
                     help="when the approval filter would decline a request, write "
                          "<task-dir>/approvals/<n>.json, print `[ask] <n> ...` and wait this long "
@@ -1817,7 +1830,7 @@ def run(args: argparse.Namespace) -> int:
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"\n===== dispatch {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                  f"mcp={granted or 'none'} sandbox={args.sandbox} "
+                  f"mcp={granted or 'none'} sandbox={args.sandbox} approvals={args.approvals} "
                   f"config={args.config or 'none'} =====\n")
         log.flush()
         marker = dispatch_marker(args.repo)
@@ -1844,6 +1857,7 @@ def run(args: argparse.Namespace) -> int:
             return 1
         server.task_dir = task_dir
         server.ask_timeout = max(0, args.ask_timeout)
+        server.approvals_mode = args.approvals
         try:
             server.run_dir = open_private_run(task_dir, [args.repo, task_dir])
         except (DispatchError, OSError) as exc:

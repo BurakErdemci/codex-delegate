@@ -102,6 +102,43 @@ def main() -> int:
             got, reason = dsp.open_decision(method, params, LANE)
             checks.append((f"{'approve' if want == 'approve' else 'ask    '}  {why}  ({reason})", got == want))
 
+    # End to end: open is the default, and exit 5 only when something declined.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        lane = ta.Lane(root, ta.field_requests(str(root / "lane"))
+                       + [{"method": FILE, "params": {"path": str(root / "elsewhere.txt")}}])
+        args = dsp.build_parser().parse_args(["--task-dir", "t", "--repo", "r", "--prompt-file", "p"])
+        out = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out):
+                rc = dsp.run(dsp.build_parser().parse_args([
+                    "--task-dir", str(lane.task), "--repo", str(lane.repo), "--prompt-file", str(lane.prompt),
+                    "--codex-home", str(lane.repo / "home"), "--timeout", "120"]))
+        finally:
+            dsp.dispatch_marker(lane.repo).unlink(missing_ok=True)
+        checks += [
+            ("--approvals defaults to open", args.approvals == "open"),
+            ("open by default: the 3 field commands and an outside file change are approved, rc=0",
+             rc == 0 and lane.replies() == ["accept"] * 4 and "[ask]" not in out.getvalue()),
+        ]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        push = {"method": CMD, "params": {"command": ["git", "push"], "cwd": str(root / "lane")}}
+        lane = ta.Lane(root, [push])
+        rc, out = lane.run("--approvals", "open", "--ask-timeout", "1")
+        checks.append(("open: git push goes to [ask] and declines on timeout, rc=5",
+                       rc == 5 and lane.replies() == ["decline"] and "[ask] 1 git push" in out))
+        lane2 = ta.Lane(root / "b", [dict(push, params={**push["params"], "cwd": str(root / "b" / "lane")})])
+        t = ta.when_asked(lane2, {1: ta.answer("approve")})
+        rc2, out2 = lane2.run("--approvals", "open", "--ask-timeout", "30")
+        t.join(5)
+        checks.append(("open: a git push the architect approves goes through, rc=0",
+                       rc2 == 0 and lane2.replies() == ["accept"]))
+        lane3 = ta.Lane(root / "c", [dict(push, params={**push["params"], "cwd": str(root / "c" / "lane")})])
+        rc3, _ = lane3.run("--approvals", "open", "--ask-timeout", "0")
+        checks.append(("open with --ask-timeout 0: git push declines at once, rc=5",
+                       rc3 == 5 and lane3.replies() == ["decline"]))
+
     failures = 0
     for name, ok in checks:
         failures += not ok

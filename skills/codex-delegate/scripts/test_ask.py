@@ -80,7 +80,10 @@ class Lane:
         args = dsp.build_parser().parse_args([
             "--task-dir", str(self.task), "--repo", str(self.repo),
             "--prompt-file", str(self.prompt), "--codex-home", str(self.repo / "home"),
-            "--timeout", "120", *flags])
+            "--timeout", "120",
+            # The [ask] scenarios below were written for the containment
+            # filter; open mode has its own cases and passes the flag itself.
+            *(() if "--approvals" in flags else ("--approvals", "strict")), *flags])
         out = io.StringIO()
         try:
             with contextlib.redirect_stdout(out):
