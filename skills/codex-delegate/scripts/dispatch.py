@@ -518,43 +518,96 @@ def _git_verdict(command: str | list, lane_root: Path, cwd_abs: str,
     return None
 
 
-# A write whose target the lexical scan cannot see. Measured 25 Nov 2026 on
+# Writes whose target the lexical scan cannot see. Measured 25 Nov 2026 on
 # codex-cli 0.171.0 with this repo's worker home: the sandbox log says
 # "Windows sandbox selection: disabled", every shell command asks for
 # approval first, and an approved command runs with the user's full token -
 # `$d = Join-Path ([Environment]::GetFolderPath('LocalApplicationData'))
 # 'dispatch-measure-x'; Set-Content (Join-Path $d 't.txt') hi` was approved
 # "command scoped to lane" and wrote %LOCALAPPDATA%\dispatch-measure-x\t.txt.
-# So a command that both WRITES and carries expansion syntax goes to the
-# architect instead of being auto-approved. This narrows the hole; it does not
-# close it: a script file in the lane, or `python -c` with os.environ, writes
-# anywhere without either marker - see SKILL.md on what [ask] can promise.
-_EXPANSION = re.compile(
-    r"\$(?:env:|\{|\(|[A-Za-z_])"           # PowerShell/sh variables, ${..}, $(..)
-    r"|%[A-Za-z_][A-Za-z0-9_]*%"             # cmd %VAR%
-    r"|`"                                    # backtick escape or substitution
-    r"|(?:^|[\s'\"(=;,])~[\\/]?"             # ~ home
-    r"|\[[A-Za-z_][\w.]*\]::",               # .NET static: [Environment]::, [IO.Path]::
-    re.IGNORECASE)
+#
+# FAIL CLOSED, not a denylist (review: a list of expansion forms missed Env:
+# drives, cd before a relative write, Resolve-Path, cmd's !VAR!, ...). A
+# shell-wrapped command that writes is auto-approved only when nothing in it
+# can make a target non-literal: no expansion, substitution, location change,
+# computed path, pipeline-fed target, nested shell or inline interpreter code.
+# Then every target is a literal token, and scan_tokens has already judged
+# every literal token inside the lane. Anything else goes to the architect.
+# Read-only commands are untouched. This still does not bound a worker that
+# writes a script file in the lane and runs it - see SKILL.md.
+#
+# Word lists use (?<![\w-]) / (?![\w-]) rather than \b: with \b, the `set` in
+# Set-Content would count as cmd's `set`.
 _WRITE = re.compile(
-    r"(?<![-=<>])>{1,2}(?![=&])"             # redirection to a file
-    r"|\b(?:set-content|add-content|out-file|new-item|copy-item|move-item|remove-item"
-    r"|rename-item|clear-content|tee-object|export-csv|export-clixml|expand-archive"
-    r"|compress-archive|start-bitstransfer|invoke-webrequest|invoke-restmethod"
-    r"|sc|ac|ni|cpi|mi|ri|rni|tee|cp|copy|xcopy|robocopy|mv|move|rm|del|erase|rd|rmdir"
-    r"|md|mkdir|ren|rename|git)\b"
-    r"|writeall|appendall|::create\(|::copy\(|::move\(|::delete\(|createdirectory"
-    r"|streamwriter|filestream|\.save\(",
+    r"(?<![-=<>])>{1,2}"                     # redirection, incl. 2>file and >>
+    r"|(?<![\w-])(?:set-content|add-content|out-file|new-item|copy-item|move-item|remove-item"
+    r"|rename-item|clear-content|clear-item|set-item|new-itemproperty|set-itemproperty"
+    r"|remove-itemproperty|tee-object|export-csv|export-clixml|expand-archive"
+    r"|compress-archive|start-bitstransfer|invoke-webrequest|invoke-restmethod|new-psdrive"
+    r"|sc|ac|ni|cpi|mi|ri|rni|si|tee|cp|copy|xcopy|robocopy|mv|move|rm|del|erase|rd|rmdir"
+    r"|md|mkdir|ren|rename|mklink|subst|attrib|icacls|takeown|touch|ln|install|dd|truncate"
+    r"|chmod|chown|sed|git|pip|npm|curl|wget|tar|unzip|7z)(?![\w-])"
+    r"|writeall|appendall|::create|::copy|::move|::delete|::replace|::encrypt|::decrypt"
+    r"|createdirectory|createtext|appendtext|streamwriter|filestream|\.save\(|\.write"
+    r"|open\(|write_text|write_bytes|shutil\.|os\.(?:remove|unlink|rename|replace|mkdir|makedirs"
+    r"|rmdir|system|popen)|subprocess|\.mkdir\(|\.unlink\(|\.touch\(|fs\.|writefile",
     re.IGNORECASE)
+_NOT_LITERAL = re.compile(
+    r"\$"                                    # any PowerShell/sh variable, $(..), ${..}, $_
+    r"|%%?[A-Za-z_~*0-9]"                    # cmd %VAR%, %~dp0, %*, for-loop %i / %%i
+    r"|![A-Za-z_][A-Za-z0-9_]*!"             # cmd delayed expansion !VAR!
+    r"|`"                                    # backtick escape or substitution
+    r"|(?:^|[\s'\"(=;,|&])~"                 # ~ home
+    r"|\[[A-Za-z_][\w.]*\]"                  # any .NET type: [Environment]::, [IO.Path], [char]
+    r"|\b[A-Za-z]{2,}:(?!\s)"                # PowerShell drives: Env:, HKCU:, Variable:, Temp:
+    r"|(?<![\w-])(?:cd|chdir|pushd|popd|set-location|sl|push-location|pop-location|resolve-path"
+    r"|split-path|join-path|convert-path|get-location|gl|pwd|get-item|gi|get-childitem|gci|ls|dir"
+    r"|xargs|foreach-object|foreach|for|where-object|invoke-expression|iex|invoke-command|icm"
+    r"|start-process|saps|start|call|powershell|pwsh|cmd|bash|sh|wsl|python|python3|py|node"
+    r"|perl|ruby|env|set|setx|export|alias|function|filter|param)(?![\w-])"
+    r"|-(?:join|replace|split|encodedcommand|enc|ec)\b"   # computed strings, encoded scripts
+    r"|['\"]\s*-f\b"                         # format operator after a string
+    r"|['\"]\s*\+|\+\s*['\"]"                # string concatenation
+    r"|\.\.\.|\*\*",                         # range / globstar forms the scan does not expand
+    re.IGNORECASE)
+_INTERPRETERS = frozenset({"python", "python3", "py", "node", "perl", "ruby"})
 
 
-def _unseen_write(command: str | list) -> str | None:
-    """Reason to ask, if the command writes through an expansion, else None."""
-    text = command if isinstance(command, str) else " ".join(str(t) for t in command)
-    expansion, write = _EXPANSION.search(text), _WRITE.search(text)
-    if expansion and write:
-        return (f"write ({write.group(0).strip()!r}) with an expansion ({expansion.group(0).strip()!r}) "
-                "whose target the scan cannot resolve")
+def _write_gate(command: str | list) -> str | None:
+    """Reason to ask the architect about a writing command, or None."""
+    if isinstance(command, list):
+        program = _program_name(str(command[0])) if command else ""
+        body = " ".join(str(t) for t in command[1:])
+        inline = program in _INTERPRETERS and any(
+            str(t) in ("-c", "-e", "--eval") for t in command[1:])
+        if inline and _WRITE.search(body):
+            return "inline interpreter code that writes; its targets cannot be modelled"
+        if program not in _SHELL_PROGRAMS and not inline:
+            # A direct argv is fully modelled: argv[0] is the program and
+            # every operand was judged by scan_tokens / _git_verdict.
+            return None
+        text = body
+    else:
+        # Drop the wrapping shell's own path ("...\powershell.exe" -Command):
+        # it names the wrapper, not something the script does.
+        head, _, rest = command.strip().partition(" ")
+        text = rest if _program_name(head) in _SHELL_PROGRAMS else command
+    # An encoded script hides every verb, write or not, so it is never judged
+    # as read-only. PowerShell takes -e, the alias -ec, and prefixes of
+    # -EncodedCommand.
+    head_program = _program_name(str(command[0]) if isinstance(command, list) and command
+                                 else command.strip().partition(" ")[0] if isinstance(command, str) else "")
+    if head_program in ("powershell", "pwsh") and any(
+            t in ("-e", "-ec") or (len(t) >= 3 and "-encodedcommand".startswith(t))
+            for t in (tok.lower().strip("'\"") for tok in text.split())):
+        return "an encoded PowerShell script cannot be read, so it cannot be judged"
+    write = _WRITE.search(text)
+    if not write:
+        return None
+    hidden = _NOT_LITERAL.search(text)
+    if hidden:
+        return (f"write ({write.group(0).strip()!r}) in a command with {hidden.group(0).strip()!r}, "
+                "so its target may not be the literal path the scan judged")
     return None
 
 
@@ -623,7 +676,7 @@ def approval_decision(method: str, params: dict, lane_root: Path, *,
         objection = scan_tokens(tokens, lane_root, cwd_abs, exempt_program=True)
         if objection:
             return "decline", objection[1]
-        unseen = _unseen_write(command)
+        unseen = _write_gate(command)
         if unseen:
             return "decline", unseen
         return "approve", "command scoped to lane"
