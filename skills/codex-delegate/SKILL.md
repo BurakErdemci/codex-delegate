@@ -678,7 +678,7 @@ which run as the user with no command filter.
   `[ask]`: `git push` in any form (`--force`, `--force-with-lease` included);
   `git reset --hard`, `git clean -f`, `git checkout -- .` or `git restore` on a
   repo that may not be the lane; recursive deletes (`rm -r`, `Remove-Item
-  -Recurse`, `rd /s`, `rmdir /s`, `del /s`) whose target is not a literal path
+  -Recurse`, `rd /s`, `rmdir /s`, `del /s`, `find -delete`/`-exec`) whose target is not a literal path
   inside the lane; any write or delete naming `.unity_architect_ai`,
   `.kimi-code`, `.cursor`, `.codex` or `.claude`. The list guards against
   accidents; it is **not** a security boundary, and a worker that wants to get
