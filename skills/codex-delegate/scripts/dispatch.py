@@ -685,6 +685,107 @@ def approval_decision(method: str, params: dict, lane_root: Path, *,
     return "decline", f"unhandled approval method {method}"
 
 
+# --- open mode (the default) ---------------------------------------------------
+#
+# Owner decision, 25 Nov 2026: a Codex worker needs no more restriction than
+# Claude's own sub-agents, which run with the user's rights and no command
+# filter. So `--approvals open` approves every request, inside the lane or
+# not, except a short list of hard-to-undo accidents, which go to the
+# architect ([ask]; no answer declines). This list guards against ACCIDENTS.
+# It is not an adversarial boundary and must not be read as one; `strict`
+# (approval_decision above) is the lexical containment, with its own limits.
+_LIVE_DATA = re.compile(r"(?:^|[\\/'\"\s~])\.(?:unity_architect_ai|kimi-code|cursor|codex|claude)"
+                        r"(?=$|[\\/'\"\s;|&)])", re.IGNORECASE)
+_SEGMENTS = re.compile(r"&&|\|\||[;&|\n]")
+_RECURSIVE_DELETE = (
+    # (program names, test on the lower-cased tokens after it)
+    # POSIX rm: a short cluster with r (-r, -rf, -Rf); PowerShell's -Force is
+    # not one, which is why the cluster is capped at four characters.
+    (("rm",), lambda args: any(re.fullmatch(r"-[A-Za-z]{1,3}", a) and "r" in a.lower()
+                                or a == "--recursive" for a in args)),
+    (("remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"),
+     lambda args: any(a.startswith("-r") and "-recurse".startswith(a.split(":")[0])
+                      for a in (x.lower() for x in args))),
+    (("rd", "rmdir", "del", "erase"), lambda args: any(a.lower() in ("/s", "/s/q", "/q/s") for a in args)),
+)
+_NOT_LITERAL_CHARS = re.compile(r"[$%!`~]")
+_LOCATION_CHANGE = re.compile(r"(?<![\w-])(?:cd|chdir|pushd|sl|set-location|push-location)(?![\w-])",
+                              re.IGNORECASE)
+
+
+def _command_text(command: Any) -> str:
+    if isinstance(command, str):
+        return command
+    if isinstance(command, list):
+        return " ".join(str(t) for t in command)
+    return ""
+
+
+def _open_guard(text: str, lane_root: Path, cwd_abs: str) -> str | None:
+    """Reason a command is on the hard-to-undo list, or None."""
+    if _LIVE_DATA.search(text) and _WRITE.search(text):
+        return "write or delete naming a live data folder (.unity_architect_ai, .kimi-code, .cursor, .codex, .claude)"
+    for segment in _SEGMENTS.split(text):
+        words = [w.strip("'\"") for w in segment.split()]
+        names = [_program_name(w) for w in words]
+        if "git" in names:
+            args = words[names.index("git") + 1:]
+            repo, j = cwd_abs, 0
+            while j < len(args) and args[j].startswith("-"):
+                if args[j] in ("-C", "-c", "--git-dir", "--work-tree") and j + 1 < len(args):
+                    if args[j] != "-c":
+                        repo = os.path.join(repo if args[j] == "-C" else cwd_abs, args[j + 1])
+                    j += 2
+                else:
+                    j += 1
+            sub = args[j].lower() if j < len(args) else ""
+            rest = args[j + 1:]
+            if sub == "push":
+                return "git push (any form, --force and --force-with-lease included)"
+            hard = ((sub == "reset" and "--hard" in rest)
+                    or (sub == "clean" and any(a == "--force" or re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", a)
+                                               for a in rest))
+                    or (sub == "checkout" and "--" in rest) or sub == "restore")
+            if hard and (_LOCATION_CHANGE.search(text) or _NOT_LITERAL_CHARS.search(repo)
+                         or not _inside_lane(repo, lane_root)):
+                return f"git {sub} that discards work, on a repo that may not be the lane"
+        for i, name in enumerate(names):
+            args = words[i + 1:]
+            if not any(name in progs and test(args) for progs, test in _RECURSIVE_DELETE):
+                continue
+            targets = [a for a in args if not a.startswith("-") and not _is_cmd_switch(a)]
+            if not targets:
+                return f"recursive delete ({words[i]}) without a target that can be checked"
+            for t in targets:
+                if _NOT_LITERAL_CHARS.search(t) or not _inside_lane(t, lane_root, cwd_abs):
+                    return f"recursive delete of {t!r}, which is not a literal path inside the lane"
+    return None
+
+
+def open_decision(method: str, params: dict, lane_root: Path) -> tuple[str, str]:
+    """`--approvals open`: approve all but the hard-to-undo list ("decline"
+    here means: ask the architect, or decline if asking is off)."""
+    if method == "item/fileChange/requestApproval":
+        for p in _collect_paths(params):
+            if _LIVE_DATA.search(p.replace("\\", "/") if p else ""):
+                return "decline", f"file change in a live data folder: {p!r}"
+        return "approve", "open mode"
+    if method == "item/commandExecution/requestApproval":
+        item = params.get("item") if isinstance(params.get("item"), dict) else {}
+        command = params.get("command") or item.get("command")
+        cwd = params.get("cwd") or item.get("cwd") or ""
+        cwd_abs = os.path.normpath(os.path.join(str(lane_root), str(cwd)))
+        guard = _open_guard(_command_text(command), lane_root, cwd_abs)
+        if guard:
+            return "decline", guard
+        return "approve", "open mode"
+    if method in DECISION_APPROVALS or method == PERMISSION_APPROVAL:
+        # AppServer.approve grants permission profiles in both modes; named
+        # here so this function answers every method the server can ask.
+        return "approve", "open mode"
+    return "decline", f"unhandled approval method {method}"
+
+
 def dispatch_marker(lane: Path) -> Path:
     """Home is outside the lane and the worker's writable roots; the path comes from the lane path only, never lane.json."""
     key = str(Path(lane).resolve())
