@@ -78,6 +78,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -643,26 +644,59 @@ class DispatchError(RuntimeError):
     pass
 
 
-def shown(text: str, keep_newlines: bool = False) -> str:
-    """Worker-supplied text made safe to show a human: every control or
-    non-printable character (ESC, BS, CR, bidi overrides, zero-width marks)
-    becomes a visible \\xNN / \\uNNNN escape, so a request cannot repaint
-    the architect's terminal or hide part of itself. Newlines and tabs stay
-    real only when keep_newlines is set (multi-line answers)."""
+def _escape(ch: str) -> str:
+    o = ord(ch)
+    return f"\\x{o:02x}" if o < 0x80 else f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}"
+
+
+def shown(text: str) -> str:
+    r"""A command, cwd or path made safe to judge: printable ASCII only.
+
+    Every other character - ASCII controls (ESC, BS, CR), and ALL non-ASCII,
+    escaped as \xNN / \uNNNN / \UNNNNNNNN. Allow-listing "printable" was not
+    enough (review): combining marks, Hangul and Braille fillers and bidi
+    controls are printable or invisible, so what the architect read could
+    differ from what runs. Newlines and tabs show as \n and \t.
+    """
     out = []
     for ch in str(text):
-        if keep_newlines and ch in "\n\t":
-            out.append(ch)
-        elif ch == "\n":
+        if ch == "\n":
             out.append("\\n")
         elif ch == "\t":
             out.append("\\t")
-        elif ch.isprintable():
+        elif " " <= ch <= "~":
             out.append(ch)
         else:
-            o = ord(ch)
-            out.append(f"\\x{o:02x}" if o < 0x100 else
-                       f"\\u{o:04x}" if o < 0x10000 else f"\\U{o:08x}")
+            out.append(_escape(ch))
+    return "".join(out)
+
+
+def non_ascii_note(*texts: str) -> str:
+    """The marker that tells the architect an escape above stands for a real
+    non-ASCII character in the request."""
+    return " (contains non-ASCII)" if any(ch > "~" for t in texts for ch in str(t)) else ""
+
+
+# Invisible or shaping characters that prose must not carry raw either.
+_FILLERS = frozenset({0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x17B4, 0x17B5, 0x180E})
+_BIDI = frozenset({0x061C, 0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)})
+
+
+def shown_prose(text: str) -> str:
+    """A model answer made safe to print while staying readable: letters in
+    any script and newlines stay; controls, format characters (zero-width,
+    bidi), combining marks (Mn/Mc/Me), private-use and unassigned code points
+    and the known fillers are escaped."""
+    out = []
+    for ch in str(text):
+        o = ord(ch)
+        if ch in "\n\t":
+            out.append(ch)
+        elif (o in _FILLERS or o in _BIDI or not ch.isprintable()
+              or unicodedata.category(ch) in ("Cc", "Cf", "Co", "Cn", "Cs", "Mn", "Mc", "Me")):
+            out.append(_escape(ch))
+        else:
+            out.append(ch)
     return "".join(out)
 
 
@@ -670,15 +704,15 @@ def show_request(request_file: Path) -> str:
     """The whole request, escaped - what the architect judges before deciding."""
     req = json.loads(request_file.read_text(encoding="utf-8"))
     if "paths" in req:
-        body = "\n".join(f"  path: {shown(p)}" for p in req.get("paths") or [])
+        body = "\n".join(f"  path: {shown(p)}{non_ascii_note(p)}" for p in req.get("paths") or [])
     else:
         cmd = req.get("command")
         text = cmd if isinstance(cmd, str) else " ".join(map(str, cmd or []))
-        body = f"  command ({len(text)} chars): {shown(text)}"
+        body = f"  command ({len(text)} chars): {shown(text)}{non_ascii_note(text)}"
     return (f"request {req.get('n')} ({request_file})\n"
             f"  method: {shown(req.get('method', ''))}\n"
-            f"  reason: {shown(req.get('reason', ''))}\n"
-            f"  cwd: {shown(req.get('cwd', ''))}\n{body}\n"
+            f"  reason: {shown(req.get('reason', ''))}{non_ascii_note(req.get('reason', ''))}\n"
+            f"  cwd: {shown(req.get('cwd', ''))}{non_ascii_note(req.get('cwd', ''))}\n{body}\n"
             f"  at: {shown(req.get('at', ''))}")
 
 
@@ -923,7 +957,7 @@ def ask_codex(argv: list[str]) -> int:
                 server.close()
     # Escaped like a request: the answer is worker text too (audit), and a raw
     # ESC sequence in it would reach the architect's terminal. Newlines stay.
-    answer = shown(server.final_text.strip() or "(no answer)", keep_newlines=True)
+    answer = shown_prose(server.final_text.strip() or "(no answer)")
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     ask_log = ask_log_path(task_dir)
     with open(ask_log, "a", encoding="utf-8") as fh:
@@ -1289,7 +1323,8 @@ class AppServer:
         not_before = request_file.stat().st_mtime
         # The FULL command, escaped: a cut at 157 chars let a worker park the
         # harmful part past it, and raw ESC/BS reached the terminal (audit).
-        line = (f"[ask] {n} {shown(reason)}: {shown(subject)}  "
+        line = (f"[ask] {n} {shown(reason)}: {shown(subject)}"
+                f"{non_ascii_note(reason, subject, request['cwd'])}  "
                 f"({len(subject)} chars; request {request_file})")
         self.log.write(line + "\n")
         self.log.flush()

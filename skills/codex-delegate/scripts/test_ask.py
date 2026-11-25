@@ -252,6 +252,48 @@ def main() -> int:
              and decided.stdout.index(tail) < decided.stdout.index("ask 1 -> decline")),
         ]
 
+    # Every class that can make the shown text differ from what runs.
+    CLASSES = {
+        "combining mark (Mn)": "\u0301", "spacing mark (Mc)": "\u0903", "enclosing mark (Me)": "\u20dd",
+        "Hangul filler": "\u3164", "Hangul choseong filler": "\u115f", "Hangul jungseong filler": "\u1160",
+        "halfwidth filler": "\uffa0", "Braille blank": "\u2800", "Khmer vowel inherent": "\u17b4",
+        "Mongolian vowel separator": "\u180e", "bidi override": "\u202e", "bidi isolate": "\u2066",
+        "zero-width space": "\u200b", "Latin letter": "\u00e7",
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        reqs = [{"method": CMD, "params": {"command": f"type C:\\x\\a{ch}b.txt", "cwd": str(root / "lane")}}
+                for ch in CLASSES.values()]
+        reqs.append({"method": CMD, "params": {"command": "type C:\\x\\plain.txt", "cwd": str(root / "lane")}})
+        lane = Lane(root, reqs)
+        rc, out = lane.run("--ask-timeout", "1")
+        lines = [l for l in out.splitlines() if l.startswith("[ask] ")]
+        for i, (name, ch) in enumerate(CLASSES.items()):
+            esc = f"\\u{ord(ch):04x}"
+            show = subprocess.run([sys.executable, str(DISPATCH), "--show", str(lane.task), str(i + 1)],
+                                  capture_output=True, text=True, encoding="utf-8").stdout
+            checks.append((f"command view escapes {name} (U+{ord(ch):04X}) in [ask] and --show, with the marker",
+                           len(lines) > i and esc in lines[i] and ch not in lines[i]
+                           and "(contains non-ASCII)" in lines[i]
+                           and esc in show and ch not in show and "(contains non-ASCII)" in show))
+        checks.append(("an all-ASCII command carries no non-ASCII marker",
+                       len(lines) == len(CLASSES) + 1 and "(contains non-ASCII)" not in lines[-1]))
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        lane = Lane(root, [])
+        lane.run("--ask-timeout", "0")
+        prose = "T\u00fcrk\u00e7e \u011f\u0131\u015f stays\nnext line " + "".join(
+            v for k, v in CLASSES.items() if k != "Latin letter")
+        lane.scenario([], answer_prefix=prose)
+        rc_p, out_p = lane.ask("prose?")
+        hidden = [v for k, v in CLASSES.items() if k != "Latin letter"]
+        checks += [
+            ("answer view keeps letters in any script and newlines readable",
+             rc_p == 0 and "T\u00fcrk\u00e7e \u011f\u0131\u015f stays\nnext line" in out_p),
+            ("answer view escapes marks, fillers, bidi and zero-width characters",
+             all(f"\\u{ord(ch):04x}" in out_p and ch not in out_p for ch in hidden)),
+        ]
+
     # --- forged decisions are ignored ----------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
