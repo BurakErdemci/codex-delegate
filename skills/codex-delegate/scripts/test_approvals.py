@@ -234,6 +234,45 @@ CASES += [
 ]
 
 
+# Writes the scan cannot resolve go to the architect (measured 25 Nov 2026: no
+# Windows sandbox in the worker home, and an approved
+# `$d = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ...;
+# Set-Content (Join-Path $d 't.txt') hi` wrote into %LOCALAPPDATA%).
+_PSQ = '"C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -Command '
+MEASURED_VAR_WRITE = (_PSQ + "'$d = Join-Path ([Environment]::GetFolderPath('\"'\"'LocalApplicationData'\"'\"')) "
+                      "'\"'\"'dispatch-measure-x'\"'\"'; New-Item -ItemType Directory -Force $d | Out-Null; "
+                      "Set-Content -LiteralPath (Join-Path $d '\"'\"'t.txt'\"'\"') -Value hi'")
+CASES += [
+    *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (MEASURED_VAR_WRITE, "the measured write into %LOCALAPPDATA% through $d"),
+        (["powershell", "-Command",
+          "$p=[Environment]::GetFolderPath('MyDocuments'); git -C $p commit -m x"],
+         "the $p ... git -C $p commit hole, with a target the scan cannot see"),
+        (["powershell", "-Command", r"$p='C:\other'; git -C $p commit -m x"],
+         "the same hole with a literal path: already an outside path"),
+        (["powershell", "-Command", r"Set-Content $env:FOO\t.txt hi"], "$env: of any name with a write"),
+        (["powershell", "-Command", "Set-Content ${out} hi"], "${...} with a write"),
+        (["powershell", "-Command", "Out-File -FilePath $(Get-Location)/../x.txt"], "$(...) with a write"),
+        (["cmd", "/c", "copy", "a.txt", "%MYDIR%\\b.txt"], "%VAR% with cmd copy"),
+        (["bash", "-lc", "echo hi > $OUT"], "$VAR target of a redirection"),
+        (["bash", "-lc", "cp a.txt `cat dest`"], "backtick substitution with cp"),
+        (["powershell", "-Command",
+          "[IO.File]::WriteAllText([IO.Path]::Combine([Environment]::GetFolderPath('Desktop'), 'x'), 'y')"],
+         ".NET write to a .NET-built path, no $ at all"),
+        (["powershell", "-Command", "Remove-Item -Recurse $target"], "a delete through a variable"),
+        (["powershell", "-Command", "ni -ItemType File $f"], "alias ni with a variable"),
+    ]],
+    *[("approve", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (["powershell", "-Command", "$files = Get-ChildItem src; $files.Count"],
+         "a variable with no write stays auto-approved"),
+        (["powershell", "-Command", "Get-Content -LiteralPath $env:PATH"], "reading through $env: is no write"),
+        (["powershell", "-Command", "Set-Content out.md 'x'"], "a literal in-lane write stays auto-approved"),
+        (["powershell", "-Command", "Get-ChildItem src | Where-Object { $_.Length -gt 10 }"],
+         "-gt is a comparison, not a redirection"),
+    ]],
+]
+
+
 # The pre-dispatch spec gate, which must agree with the filter above. It once
 # did not: the switch exemption lived in approval_decision, so the gate blocked
 # `cmd /c ...` that the live filter approves. Both now share scan_tokens.

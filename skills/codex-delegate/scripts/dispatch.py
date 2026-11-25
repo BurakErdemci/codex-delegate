@@ -517,6 +517,46 @@ def _git_verdict(command: str | list, lane_root: Path, cwd_abs: str,
     return None
 
 
+# A write whose target the lexical scan cannot see. Measured 25 Nov 2026 on
+# codex-cli 0.171.0 with this repo's worker home: the sandbox log says
+# "Windows sandbox selection: disabled", every shell command asks for
+# approval first, and an approved command runs with the user's full token -
+# `$d = Join-Path ([Environment]::GetFolderPath('LocalApplicationData'))
+# 'dispatch-measure-x'; Set-Content (Join-Path $d 't.txt') hi` was approved
+# "command scoped to lane" and wrote %LOCALAPPDATA%\dispatch-measure-x\t.txt.
+# So a command that both WRITES and carries expansion syntax goes to the
+# architect instead of being auto-approved. This narrows the hole; it does not
+# close it: a script file in the lane, or `python -c` with os.environ, writes
+# anywhere without either marker - see SKILL.md on what [ask] can promise.
+_EXPANSION = re.compile(
+    r"\$(?:env:|\{|\(|[A-Za-z_])"           # PowerShell/sh variables, ${..}, $(..)
+    r"|%[A-Za-z_][A-Za-z0-9_]*%"             # cmd %VAR%
+    r"|`"                                    # backtick escape or substitution
+    r"|(?:^|[\s'\"(=;,])~[\\/]?"             # ~ home
+    r"|\[[A-Za-z_][\w.]*\]::",               # .NET static: [Environment]::, [IO.Path]::
+    re.IGNORECASE)
+_WRITE = re.compile(
+    r"(?<![-=<>])>{1,2}(?![=&])"             # redirection to a file
+    r"|\b(?:set-content|add-content|out-file|new-item|copy-item|move-item|remove-item"
+    r"|rename-item|clear-content|tee-object|export-csv|export-clixml|expand-archive"
+    r"|compress-archive|start-bitstransfer|invoke-webrequest|invoke-restmethod"
+    r"|sc|ac|ni|cpi|mi|ri|rni|tee|cp|copy|xcopy|robocopy|mv|move|rm|del|erase|rd|rmdir"
+    r"|md|mkdir|ren|rename|git)\b"
+    r"|writeall|appendall|::create\(|::copy\(|::move\(|::delete\(|createdirectory"
+    r"|streamwriter|filestream|\.save\(",
+    re.IGNORECASE)
+
+
+def _unseen_write(command: str | list) -> str | None:
+    """Reason to ask, if the command writes through an expansion, else None."""
+    text = command if isinstance(command, str) else " ".join(str(t) for t in command)
+    expansion, write = _EXPANSION.search(text), _WRITE.search(text)
+    if expansion and write:
+        return (f"write ({write.group(0).strip()!r}) with an expansion ({expansion.group(0).strip()!r}) "
+                "whose target the scan cannot resolve")
+    return None
+
+
 def approval_decision(method: str, params: dict, lane_root: Path, *,
                       is_repo=_real_is_repo) -> tuple[str, str]:
     """Windows decision for one sandbox approval: ("approve"|"decline", reason).
@@ -582,6 +622,9 @@ def approval_decision(method: str, params: dict, lane_root: Path, *,
         objection = scan_tokens(tokens, lane_root, cwd_abs, exempt_program=True)
         if objection:
             return "decline", objection[1]
+        unseen = _unseen_write(command)
+        if unseen:
+            return "decline", unseen
         return "approve", "command scoped to lane"
     # DECISION_APPROVALS may grow; a method this function does not understand
     # must never be approved by accident.
