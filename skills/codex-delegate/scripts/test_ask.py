@@ -308,6 +308,15 @@ def main() -> int:
                        (rc, lane.replies()) == ((0, ["accept"]) if os.name == "nt" else (5, ["decline"]))
                        and ("[ask]" not in out) == (os.name == "nt")))
 
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        lane = Lane(root, [{"method": CMD, "params": {"command": 42, "cwd": str(root / "lane")}},
+                           {"method": CMD, "params": {"command": {"x": 1}, "cwd": str(root / "lane")}}])
+        rc, out = lane.run("--ask-timeout", "30")
+        checks.append(("a command that is an int or an object declines without "
+                       "asking and without killing the dispatcher",
+                       rc == 5 and lane.replies() == ["decline"] * 2 and "[ask]" not in out))
+
     # --- --ask ---------------------------------------------------------------
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

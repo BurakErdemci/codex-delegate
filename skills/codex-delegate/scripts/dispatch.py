@@ -1168,9 +1168,19 @@ class AppServer:
             subject = " ".join(request["paths"])
         else:
             command = params.get("command") or item.get("command")
+            if isinstance(command, str):
+                subject = command
+            elif isinstance(command, list) and all(isinstance(t, (str, int, float)) for t in command):
+                subject = " ".join(map(str, command))
+            else:
+                # An int or an object here used to raise TypeError and kill the
+                # dispatcher mid-turn (audit). Nothing to show means nothing
+                # the architect can judge: decline without asking.
+                self.log.write(f"[ask-skipped] {n}: command of type {type(command).__name__} "
+                               "cannot be shown; declined\n")
+                return "decline", f"{reason} (command is not a string or list; not asked)", ""
             request["command"] = command
-            subject = command if isinstance(command, str) else " ".join(map(str, command or []))
-        request["cwd"] = params.get("cwd") or item.get("cwd") or str(self.lane_root)
+        request["cwd"] = str(params.get("cwd") or item.get("cwd") or self.lane_root)
         request["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         request["nonce"] = nonce
         request_file = adir / f"{n}.json"
