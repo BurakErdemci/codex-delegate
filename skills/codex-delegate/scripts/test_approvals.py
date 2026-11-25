@@ -197,6 +197,43 @@ CASES = [
 ]
 
 
+# Field regressions from 25 Nov 2026: three read-only in-lane commands, copied
+# verbatim from the declined approval payloads (item/completed `command`). The
+# lexical filter still declines them - teaching it to parse these shells was
+# rejected in review (every parser disagrees with some shell) - so they are
+# the cases the [ask] flow exists for; test_ask.py drives them through it.
+RG_REGEX = '"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe" -Command "rg -n \'register_agent_tools\\\\(mcp\\\\)|pending = |if not belongsOnScreen|held = _FUSE|text = row.get\\\\(\\"last_result\\"\\\\)|_skip = \\\\(set\\\\(_own_ids\\\\)\' Backend/app/unity_ai_mcp/server.py Backend/app/database.py Frontend/frontend/renderer/hooks/home/useMCPApproval.ts Backend/app/agentic/subagents.py Backend/app/routes/conversation_routes.py"'
+PS_RECORDS_REGEX = '"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe" -Command \'$log = Get-Content -LiteralPath .delegate-runs/2026-11-25-alt-ajan-dogrulama/turn-1.md -Raw -ErrorAction Stop\nif ($log -match \'"\'SKELETON\' -or "\'$log -notmatch \'"\'(?m)"\'^status: completed$\'"\') { throw \'Changelog status was not recorded\' }\n"\'$records = [regex]::Matches($log, \'"\'(?m)"\'^  - (\'"\\\\.delegate-runs/\\\\S+) - \')\nforeach ("\'$record in $records) {\n  if (-not (Test-Path -LiteralPath $record.Groups[1].Value -PathType Leaf)) { throw \'"\'Missing changelog deliverable\' }\n}\n"\'$flags = [regex]::Match($log, \'"\'(?ms)"\'^flags:\'"\\\\r?\\\\n(.*?)\\\\r?\\\\n## detail\').Groups[1].Value\nWrite-Output \\"Manifest files: "\'$($records.Count)"\nWrite-Output "Flags: $([regex]::Matches($flags, \'"\'(?m)"\'^  - \'"\').Count)\\""'
+PS_SUBEXPR_THEN_GIT = '"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe" -Command \'$task = \'"\'.delegate-runs/2026-11-25-betik-araci-dogrulama\'\n"\'$log = Get-Content -LiteralPath "$task/turn-1.md" -Raw\nif ($log -match \'"\'SKELETON\' -or "\'$log -notmatch \'"\'(?m)"\'^status: completed\'"\\\\r?"\'$\'"\') { throw \'Turn log is incomplete\' }\n"\'$paths = [regex]::Matches($log, \'"\'(?m)"\'^  - (\'"\\\\S+\\\\.(md|py)) - \')\nforeach ("\'$path in $paths) {\n    if (-not (Test-Path -LiteralPath $path.Groups[1].Value -PathType Leaf)) { throw "Missing file: $($path.Groups[1].Value)" }\n}\n$files = @(Get-ChildItem -File -LiteralPath "$task/findings","$task/probes")\nif ($files.Count + 1 -ne $paths.Count -or $paths.Count -ne 15) { throw \'"\'Manifest count differs from disk\' }\nif (Get-ChildItem -Force -LiteralPath \\""\'$task/tmp") { throw \'"\'Scratch directory still contains files\' }\n\\"Verified manifest entries: "\'$($paths.Count)"\ngit status --short --untracked-files=all\ngit diff --check\''
+FIELD_2026_11_25 = (RG_REGEX, PS_RECORDS_REGEX, PS_SUBEXPR_THEN_GIT)
+
+CASES += [
+    ("decline", CMD, {"command": RG_REGEX, "cwd": "."},
+     r"rg pattern \(set\(_own_ids\) reads as a UNC root: filter declines, architect is asked"),
+    ("decline", CMD, {"command": PS_RECORDS_REGEX, "cwd": "."},
+     r"PowerShell regex (\.delegate-runs/\S+) reads as rooted: filter declines, architect is asked"),
+    ("decline", CMD, {"command": PS_SUBEXPR_THEN_GIT, "cwd": "."},
+     "PowerShell $(...) beside git status: filter declines, architect is asked"),
+    # --- true outside paths dressed with regex fragments: always decline ---
+    *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (RG_REGEX[:-1] + ' C:/Users/x/.codex/auth.json"', "outside path next to a regex"),
+        (PS_SUBEXPR_THEN_GIT[:-1] + "\ngit push'", "git push inside a PowerShell script"),
+        (PS_RECORDS_REGEX[:-1] + "\nSet-Content -LiteralPath C:/Users/x/out.txt -Value 1'",
+         "outside write in a regex-carrying script"),
+        (["cmd", "/c", "type", r"C:\Users\x\.ssh\id_rsa\s+"], r"drive path + \s+ as a plain arg"),
+        (["cmd", "/c", "type", r"\(x\)\..\..\secret\S+"], r"rooted path opening with \( as a plain arg"),
+        (["cmd", "/c", "type", r"..\..\secret\s+"], r"..\..\ escape + \s+ as a plain arg"),
+        (["cmd", "/c", "type", "\\\\server\\share\\x\\s+"], r"UNC + \s+ as a plain arg"),
+        (["powershell", "-Command", r"Set-Content \..\..\secret\S+ x"], r"rooted .. + \S+ via Set-Content"),
+        (["rg", "-n", r"\(set\(_own_ids\)", r"C:\Users\x\secret\s+"], "drive path as rg's PATH operand"),
+        (["rg", "-n", r"\(a\)", r"\(x\)\..\secret"], r"rooted path opening with \( as rg's PATH"),
+        (["rg", "-n", "pat", r"..\..\secret\S+"], r"..\..\ escape as rg's PATH operand"),
+        (["rg", "-n", "pat", "\\\\server\\share\\s+"], "UNC as rg's PATH operand"),
+        (["powershell", "-Command", r"rg -n '\(a\)' C:\Users\x\secret\s+"], "rg PATH inside a shell script"),
+    ]],
+]
+
+
 # The pre-dispatch spec gate, which must agree with the filter above. It once
 # did not: the switch exemption lived in approval_decision, so the gate blocked
 # `cmd /c ...` that the live filter approves. Both now share scan_tokens.
