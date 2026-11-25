@@ -760,6 +760,24 @@ def lane_thread(task_dir: Path) -> str | None:
     return found[-1] if found else None
 
 
+def ask_log_path(task_dir: Path) -> Path:
+    """Where --ask appends its record: the private run folder, never the lane.
+
+    The first cut appended to <task-dir>/ASK.log. --ask runs with the
+    architect's rights and open() follows links, so a worker that replaced that
+    file with a symlink or junction redirected the write anywhere (review
+    finding). Runs from before the private folder get a private log keyed like
+    the index.
+    """
+    run_dir = find_private_run(task_dir)
+    if run_dir is not None:
+        return run_dir / "ASK.log"
+    logs = private_root() / "ask-logs"
+    _private_dir(private_root())
+    _private_dir(logs)
+    return logs / _index_file(task_dir).name.replace(".json", ".log")
+
+
 def ask_codex(argv: list[str]) -> int:
     """`--ask <task-dir> "<question>"`: one read-only turn on the lane's thread."""
     ap = argparse.ArgumentParser(prog="dispatch.py --ask")
@@ -781,8 +799,8 @@ def ask_codex(argv: list[str]) -> int:
         print(f"ERROR: no valid thread id for {args.task_dir} (private run folder, then "
               "RAW_OUTPUT.log; only a UUID-shaped id is accepted)", file=sys.stderr)
         return 2
-    # The transcript stays out of the lane: the turn must change no lane
-    # file, and ASK.log is the one record it adds.
+    # The transcript stays out of the lane: --ask runs outside the sandbox and
+    # writes nothing into the lane at all.
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".ask-transcript.log",
                                      delete=False) as log:
         transcript = Path(log.name)
@@ -807,10 +825,12 @@ def ask_codex(argv: list[str]) -> int:
                 server.close()
     answer = server.final_text.strip() or "(no answer)"
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    with open(task_dir / "ASK.log", "a", encoding="utf-8") as fh:
+    ask_log = ask_log_path(task_dir)
+    with open(ask_log, "a", encoding="utf-8") as fh:
         fh.write(f"===== {stamp} thread={thread_id} declined={server.declined}\n"
                  f"Q: {args.question}\nA: {answer}\n\n")
     print(answer)
+    print(f"(appended to {ask_log})")
     transcript.unlink(missing_ok=True)
     return 0
 

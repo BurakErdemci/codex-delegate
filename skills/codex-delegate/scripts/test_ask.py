@@ -107,7 +107,7 @@ class Lane:
 
     def snapshot(self) -> dict[str, str]:
         return {str(p.relative_to(self.repo)): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in sorted(self.repo.rglob("*")) if p.is_file() and p.name != "ASK.log"}
+                for p in sorted(self.repo.rglob("*")) if p.is_file()}
 
     def results(self) -> list[dict]:
         return [m.get("result") for m in self.wire() if m.get("id", 0) > 1000 and "method" not in m]
@@ -323,7 +323,22 @@ def main() -> int:
         (lane.task / "THREAD.json").write_text(json.dumps(
             {"thread_id": "0bbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2", "repo": str(root),
              "codex_home": str(evil_home)}), encoding="utf-8")
+        # And a link planted where ASK.log used to be: a junction needs no
+        # privilege; a file symlink is tried too, skipped if the account lacks it.
+        victim = root / "victim"
+        victim.mkdir()
+        (victim / "keep.txt").write_text("untouched", encoding="utf-8")
+        junction = subprocess.run(["cmd", "/c", "mklink", "/J", str(lane.task / "ASK.log"), str(victim)],
+                                  capture_output=True) if os.name == "nt" else None
+        planted = (lane.task / "ASK.log").exists()
+        if not planted:
+            try:
+                os.symlink(victim / "keep.txt", lane.task / "ASK.log")
+                planted = True
+            except OSError:
+                pass
         before = lane.snapshot()
+        victim_before = sorted((p.name, p.read_bytes()) for p in victim.iterdir())
         lane.scenario([
             {"method": CMD, "params": {"command": ["git", "status"], "cwd": lane_dir}},
             {"method": "item/fileChange/requestApproval",
@@ -334,8 +349,12 @@ def main() -> int:
         wire = lane.wire()
         env = next(m["_env"] for m in wire if "_env" in m)
         resume = next((m for m in wire if m.get("method") == "thread/resume"), {})
-        asklog = (lane.task / "ASK.log").read_text(encoding="utf-8")
+        private_log = dsp.find_private_run(lane.task) / "ASK.log"
+        asklog = private_log.read_text(encoding="utf-8") if private_log.is_file() else ""
         checks += [
+            ("a link planted at the old ASK.log path was really there", planted),
+            ("--ask never writes through a link planted at the old lane ASK.log path",
+             sorted((p.name, p.read_bytes()) for p in victim.iterdir()) == victim_before),
             ("--ask resumes the privately recorded thread read-only, in the layout's lane",
              resume.get("params", {}).get("threadId") == THREAD
              and resume["params"].get("sandbox") == "read-only"
@@ -346,14 +365,27 @@ def main() -> int:
             ("--ask declines every request, even one the filter would approve",
              lane.results() == [{"decision": "decline"}, {"decision": "decline"},
                                 {"permissions": {}, "scope": "turn"}]),
-            ("--ask prints the answer and appends Q and A to ASK.log",
+            ("--ask appends Q and A to ASK.log in the private run folder and prints its path",
              rc == 0 and "ANSWER" in out and "why did you skip the probe?" in out
-             and "Q: why did you skip the probe?" in asklog and "A: ANSWER" in asklog),
-            ("--ask changes no lane file besides ASK.log", lane.snapshot() == before),
+             and "Q: why did you skip the probe?" in asklog and "A: ANSWER" in asklog
+             and str(private_log) in out),
+            ("--ask changes no lane file at all", lane.snapshot() == before),
         ]
+        # A hard link needs no privilege either, and unlike a junction it is a
+        # file: an append through the old path would land in the victim file.
+        if os.name == "nt" and junction is not None:
+            subprocess.run(["cmd", "/c", "rmdir", str(lane.task / "ASK.log")], capture_output=True)
+        else:
+            (lane.task / "ASK.log").unlink(missing_ok=True)
+        os.link(victim / "keep.txt", lane.task / "ASK.log")
         rc2, _ = lane.ask("again?")
-        checks.append(("a second --ask appends", rc2 == 0 and (lane.task / "ASK.log").read_text(
-            encoding="utf-8").count("===== ") == 2))
+        checks += [
+            ("a second --ask appends", rc2 == 0 and private_log.read_text(
+                encoding="utf-8").count("===== ") == 2),
+            ("--ask never writes through a hard link planted at the old ASK.log path",
+             (victim / "keep.txt").read_text(encoding="utf-8") == "untouched"),
+        ]
+        (lane.task / "ASK.log").unlink()
         # Malformed id in the private record is refused, not passed on.
         (dsp.find_private_run(lane.task) / "thread.json").write_text(
             json.dumps({"thread_id": "../../etc"}), encoding="utf-8")
