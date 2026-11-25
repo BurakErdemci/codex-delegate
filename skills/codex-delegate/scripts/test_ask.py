@@ -66,6 +66,27 @@ class Lane:
                             encoding="utf-8")
         os.environ["FAKE_APP_SERVER_CFG"] = str(self.cfg)
 
+    def ask(self, *argv: str) -> tuple[int, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = dsp.ask_codex([str(self.task), *argv, "--codex-home", str(self.repo / "home")])
+        # A failed --ask keeps its transcript in the temp dir for diagnosis;
+        # the test made it, so the test removes it.
+        for line in err.getvalue().splitlines():
+            if line.startswith("transcript kept at "):
+                Path(line[len("transcript kept at "):]).unlink(missing_ok=True)
+        return rc, out.getvalue()
+
+    def snapshot(self) -> dict[str, str]:
+        import hashlib
+        return {str(p.relative_to(self.repo)): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in sorted(self.repo.rglob("*")) if p.is_file() and p.name != "ASK.log"}
+
+    def results(self) -> list[dict]:
+        return [json.loads(line)["in"].get("result")
+                for line in self.record.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["in"].get("id", 0) > 1000 and "method" not in json.loads(line)["in"]]
+
     def run(self, *flags: str) -> tuple[int, str]:
         args = dsp.build_parser().parse_args([
             "--task-dir", str(self.task), "--repo", str(self.repo),
@@ -209,6 +230,57 @@ def main() -> int:
              (rc, lane.replies()) == ((0, ["accept"]) if os.name == "nt" else (5, ["decline"]))
              and ("[ask]" not in out) == (os.name == "nt")),
         ]
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        lane_dir = str(root / "lane")
+        lane = Lane(root, [])
+        rc_run, _ = lane.run("--ask-timeout", "0")
+        meta = json.loads((lane.task / "THREAD.json").read_text(encoding="utf-8"))
+        checks.append(("run records the thread id, repo and home in THREAD.json",
+                       rc_run == 0 and meta["thread_id"] == "thread-fake-1"
+                       and Path(meta["repo"]) == lane.repo))
+        before = lane.snapshot()
+        lane.scenario([
+            {"method": CMD, "params": {"command": ["git", "status"], "cwd": lane_dir}},
+            {"method": "item/fileChange/requestApproval",
+             "params": {"path": str(lane.repo / "x.txt")}},
+            {"method": dsp.PERMISSION_APPROVAL, "params": {"permissions": {"network": {"enabled": True}}}},
+        ], echo=True, answer_prefix="ANSWER")
+        rc, out = lane.ask("why did you skip the probe?")
+        wire = [json.loads(l)["in"] for l in lane.record.read_text(encoding="utf-8").splitlines()]
+        resume = next((m for m in wire if m.get("method") == "thread/resume"), {})
+        asklog = (lane.task / "ASK.log").read_text(encoding="utf-8")
+        checks += [
+            ("--ask resumes the recorded thread read-only",
+             resume.get("params", {}).get("threadId") == "thread-fake-1"
+             and resume["params"].get("sandbox") == "read-only"),
+            ("--ask declines every request, even one the filter would approve",
+             lane.results() == [{"decision": "decline"}, {"decision": "decline"},
+                                {"permissions": {}, "scope": "turn"}]),
+            ("--ask prints the answer and appends Q and A to ASK.log",
+             rc == 0 and "ANSWER" in out and "why did you skip the probe?" in out
+             and "Q: why did you skip the probe?" in asklog and "A: ANSWER" in asklog),
+            ("--ask changes no lane file besides ASK.log", lane.snapshot() == before),
+            ("--ask leaves no dispatch state behind (no FINAL.txt rewrite, no approvals/)",
+             not (lane.task / "approvals").exists()),
+        ]
+        rc2, _ = lane.ask("again?")
+        checks.append(("a second --ask appends", rc2 == 0 and (lane.task / "ASK.log").read_text(
+            encoding="utf-8").count("===== ") == 2))
+        (lane.task / "THREAD.json").unlink()
+        (lane.task / "RAW_OUTPUT.log").write_text(
+            '[item/started] {"threadId": "thread-old-0"}\n[x] {"threadId": "thread-fake-1"}\n',
+            encoding="utf-8")
+        lane.scenario([], echo=True, answer_prefix="ANSWER")
+        rc3, out3 = lane.ask("old run?")
+        checks.append(("without THREAD.json the last thread id in RAW_OUTPUT.log is used",
+                       rc3 == 0 and "ANSWER" in out3))
+        (lane.task / "RAW_OUTPUT.log").write_text('{"threadId": "thread-gone"}\n', encoding="utf-8")
+        rc4, _ = lane.ask("gone?")
+        checks.append(("a thread the server cannot resume fails with rc=1", rc4 == 1))
+        (lane.task / "RAW_OUTPUT.log").write_text("nothing here\n", encoding="utf-8")
+        rc5, _ = lane.ask("none?")
+        checks.append(("no thread id at all is rc=2", rc5 == 2))
     failures = 0
     for name, ok in checks:
         failures += not ok

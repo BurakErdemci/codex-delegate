@@ -73,6 +73,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import tomllib
@@ -622,6 +623,88 @@ def read_decision(path: Path) -> tuple[str | None, str]:
     return (verdict if verdict in ("approve", "decline") else None), note
 
 
+_THREAD_ID_IN_LOG = re.compile(r'"threadId": "([0-9A-Za-z-]+)"')
+
+ASK_PREAMBLE = (
+    "The architect has a question about the work you just did in this thread. "
+    "Answer it from what you already know. Do not run commands, do not edit "
+    "files: this turn is read-only and every approval request will be declined.\n\n"
+    "Question: ")
+
+
+def lane_thread(task_dir: Path) -> tuple[str | None, Path | None, Path | None]:
+    """(thread id, repo, codex home) of the task's last dispatch.
+
+    THREAD.json is written at thread/start. Runs dispatched before it existed
+    carry the id only in RAW_OUTPUT.log (approval and notification payloads),
+    so fall back to the last id there and to the <repo>/.delegate-runs/<task>
+    layout new-lane.py creates.
+    """
+    meta = task_dir / "THREAD.json"
+    if meta.is_file():
+        data = json.loads(meta.read_text(encoding="utf-8"))
+        return (data.get("thread_id"), Path(data["repo"]) if data.get("repo") else None,
+                Path(data["codex_home"]) if data.get("codex_home") else None)
+    raw = task_dir / "RAW_OUTPUT.log"
+    found = (_THREAD_ID_IN_LOG.findall(raw.read_text(encoding="utf-8", errors="replace"))
+             if raw.is_file() else [])
+    repo = task_dir.parent.parent if task_dir.parent.name == ".delegate-runs" else None
+    return (found[-1] if found else None), repo, None
+
+
+def ask_codex(argv: list[str]) -> int:
+    """`--ask <task-dir> "<question>"`: one read-only turn on the lane's thread."""
+    ap = argparse.ArgumentParser(prog="dispatch.py --ask")
+    ap.add_argument("task_dir", type=Path)
+    ap.add_argument("question")
+    ap.add_argument("--codex-home", type=Path, default=None)
+    ap.add_argument("--repo", type=Path, default=None)
+    ap.add_argument("--timeout", type=int, default=600)
+    args = ap.parse_args(argv)
+    thread_id, repo, home = lane_thread(args.task_dir)
+    repo = args.repo or repo
+    home = args.codex_home or home or Path.home() / ".codex-worker"
+    if not thread_id:
+        print(f"ERROR: no thread id for {args.task_dir} (no THREAD.json, none in RAW_OUTPUT.log)",
+              file=sys.stderr)
+        return 2
+    if repo is None or not repo.is_dir():
+        print(f"ERROR: cannot tell the lane repo for {args.task_dir}; pass --repo", file=sys.stderr)
+        return 2
+    # The transcript stays out of the lane: the turn must change no lane
+    # file, and ASK.log is the one record it adds.
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".ask-transcript.log",
+                                     delete=False) as log:
+        transcript = Path(log.name)
+        server: AppServer | None = None
+        try:
+            server = AppServer(home, repo, log, None, timeout=args.timeout)
+            server.read_only = True
+            server.request("initialize", {"clientInfo": {"name": "codex-delegate", "version": "2.1.0"}})
+            server.send({"method": "initialized"})
+            server.request("thread/resume", {
+                "threadId": thread_id, "cwd": str(repo), "sandbox": "read-only",
+                "approvalPolicy": "on-request", "excludeTurns": True})
+            started = time.monotonic()
+            server.request("turn/start", {"threadId": thread_id, "input": [
+                {"type": "text", "text": ASK_PREAMBLE + args.question}]})
+            wait_turn(server, started, args.timeout)
+        except DispatchError as exc:
+            print(f"ERROR: {exc}\ntranscript kept at {transcript}", file=sys.stderr)
+            return 1
+        finally:
+            if server is not None:
+                server.close()
+    answer = server.final_text.strip() or "(no answer)"
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    with open(args.task_dir / "ASK.log", "a", encoding="utf-8") as fh:
+        fh.write(f"===== {stamp} thread={thread_id} declined={server.declined}\n"
+                 f"Q: {args.question}\nA: {answer}\n\n")
+    print(answer)
+    transcript.unlink(missing_ok=True)
+    return 0
+
+
 def decide(argv: list[str]) -> int:
     """`--decide <task-dir> <n> approve|decline [note]`: answer one [ask]."""
     if len(argv) < 3 or argv[2] not in ("approve", "decline"):
@@ -769,6 +852,7 @@ class AppServer:
         self.ask_timeout = 0
         self.architect_approved = 0
         self.ask_timeouts = 0
+        self.read_only = False
         # fileChange approvals reference paths by itemId only; the items
         # themselves stream past earlier as notifications (see
         # enrich_file_change). One turn holds a handful of these.
@@ -840,6 +924,16 @@ class AppServer:
     def approve(self, msg: dict[str, Any]) -> None:
         rid, method = msg["id"], msg["method"]
         params = msg.get("params") or {}
+        if self.read_only and method in (PERMISSION_APPROVAL, *DECISION_APPROVALS):
+            # --ask mode: the question turn must not change anything, so every
+            # request is refused without asking anyone. An empty permission
+            # profile is the refusal shape for permissions.
+            self.declined += 1
+            self.log.write(f"[decline] {method}: --ask turns are read-only: {json.dumps(params)[:400]}\n")
+            reply = ({"permissions": {}, "scope": "turn"} if method == PERMISSION_APPROVAL
+                     else {"decision": "decline"})
+            self.send({"id": rid, "result": reply})
+            return
         if method == PERMISSION_APPROVAL:
             # 0.145+ rejects {"decision": ...} here. Grant exactly the profile
             # asked for, scoped to this turn so nothing is persisted.
@@ -1020,6 +1114,35 @@ class AppServer:
                 self.proc.kill()
             except Exception:
                 pass
+
+
+def wait_turn(server: "AppServer", started: float, timeout: int) -> None:
+    """Pump the stream until turn/completed; raise unless it completed."""
+    while True:
+        if time.monotonic() - started > timeout:
+            raise DispatchError(f"timed out after {timeout}s")
+        msg = server.read()
+        if msg.get("method") == "turn/completed":
+            params = msg.get("params") or {}
+            server.note("turn/completed", params)
+            # turn/completed is NOT a success signal - it also carries
+            # refusals and provider-side failures. Measured: OpenAI's
+            # cybersecurity classifier rejected a red-team turn
+            # (status=failed, codexErrorInfo=cyberPolicy) and this
+            # wrapper still printed OK, so an empty lane was delivered
+            # as a finished one.
+            turn = params.get("turn") or params
+            status = turn.get("status") or params.get("status")
+            if status is not None and status != "completed":
+                err = turn.get("error") or params.get("error") or {}
+                kind = err.get("codexErrorInfo") if isinstance(err, dict) else None
+                raise DispatchError(
+                    f"turn ended with status={status!r}"
+                    + (f" codexErrorInfo={kind!r}" if kind else "")
+                    + f": {json.dumps(err)[:400]}"
+                )
+            break
+        server.handle(msg)
 
 
 def write_done(path: Path, rc: int, final_path: Path, verdict: str | None = None) -> None:
@@ -1291,34 +1414,15 @@ def run(args: argparse.Namespace) -> int:
             thread_id = (thread.get("thread") or {}).get("id")
             if not thread_id:
                 raise DispatchError(f"thread/start returned no thread id: {thread}")
+            # `--ask` resumes this thread later; the log alone carries the id
+            # only inside approval payloads, which a quiet turn never has.
+            _write_atomic(task_dir / "THREAD.json", json.dumps(
+                {"thread_id": thread_id, "repo": str(args.repo),
+                 "codex_home": str(args.codex_home)}, indent=2) + "\n")
 
             server.request("turn/start", {"threadId": thread_id, "input": [{"type": "text", "text": prompt}]})
 
-            while True:
-                if time.monotonic() - started > args.timeout:
-                    raise DispatchError(f"timed out after {args.timeout}s")
-                msg = server.read()
-                if msg.get("method") == "turn/completed":
-                    params = msg.get("params") or {}
-                    server.note("turn/completed", params)
-                    # turn/completed is NOT a success signal - it also carries
-                    # refusals and provider-side failures. Measured: OpenAI's
-                    # cybersecurity classifier rejected a red-team turn
-                    # (status=failed, codexErrorInfo=cyberPolicy) and this
-                    # wrapper still printed OK, so an empty lane was delivered
-                    # as a finished one.
-                    turn = params.get("turn") or params
-                    status = turn.get("status") or params.get("status")
-                    if status is not None and status != "completed":
-                        err = turn.get("error") or params.get("error") or {}
-                        kind = err.get("codexErrorInfo") if isinstance(err, dict) else None
-                        raise DispatchError(
-                            f"turn ended with status={status!r}"
-                            + (f" codexErrorInfo={kind!r}" if kind else "")
-                            + f": {json.dumps(err)[:400]}"
-                        )
-                    break
-                server.handle(msg)
+            wait_turn(server, started, args.timeout)
         except DispatchError as exc:
             log.write(f"[fatal] {exc}\n")
             # Four field failures wore the same clothes (cyberPolicy exit 1,
@@ -1407,6 +1511,8 @@ def main() -> int:
         pass
     if argv[:1] == ["--decide"]:
         return decide(argv[1:])
+    if argv[:1] == ["--ask"]:
+        return ask_codex(argv[1:])
     try:
         args = build_parser().parse_args()
     except SystemExit as exc:
