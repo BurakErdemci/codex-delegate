@@ -674,40 +674,63 @@ was denied.
 request (method, reason, command or paths, cwd, a one-time nonce) to a
 **private folder outside the lane** - `%LOCALAPPDATA%\codex-delegate\runs\<run-id>\approvals\`
 on Windows, `~/.local/state/codex-delegate/runs/<run-id>/approvals/` on POSIX
-(owner-only) - and prints one line to stdout and RAW_OUTPUT.log naming it:
+(owner-only) - and prints one line to stdout and RAW_OUTPUT.log with the whole
+command, escaped (every non-ASCII and control character as `\xNN`/`\uNNNN`,
+plus `(contains non-ASCII)` when there was any), its length and the request file:
 
-    [ask] 3 absolute path outside lane: '\\(set\\(_own_ids\\': "...powershell.exe" -Command "rg -n ...  (approvals: C:\Users\...\runs\9f3c...\approvals)
+    [ask] 3 absolute path outside lane: ...: "...powershell.exe" -Command "rg -n ..."  (212 chars; request C:\Users\...\runs\9f3c...\approvals\3.json)
 
-Read the request and answer it while the worker waits:
+Read the request in full, then answer it while the worker waits:
 
+    python dispatch.py --show <task-dir> 3
     python dispatch.py --decide <task-dir> 3 approve
     python dispatch.py --decide <task-dir> 3 decline "use Select-String inside the lane"
 
-`--decide` finds the folder through a private index keyed by the task dir, and
-copies the request's nonce into the answer. Answer only through it: a decision
-without that nonce, or older than its request, is ignored, and nothing in the
-lane is ever read as an answer - the worker can write the lane, so a channel
-there would let it approve itself. If the private root would resolve inside
-the lane, `[ask]` is off for the run (`[ask-disabled]` in the log) and declines
-are immediate.
+`--decide` prints the full request again before it writes the answer. It finds
+the folder through a private index keyed by the task dir and copies the
+request's nonce into the answer; a decision without that nonce, or older than
+its request, is ignored, and nothing in the lane is ever read as an answer. If
+the private root would resolve inside the lane, `[ask]` is off for the run
+(`[ask-disabled]` in the log) and declines are immediate.
 
 The note on a decline reaches the worker as a steer message (the approval reply
 itself has no reason field). No answer within `--ask-timeout` seconds (default
-600) declines, exactly as before - waiting never approves; `--ask-timeout 0`
-restores the immediate decline. Requests you approve do not count toward exit
-`5`; the verdict line reports them as `(n approved by architect)`. The filter is
-lexical and still declines read-only regex searches and PowerShell `$(...)`
-(measured 25 Nov 2026) - those are exactly what `[ask]` is for. A detached lane
-needs its stdout in a file you watch, or a poll on the printed approvals folder.
+600; codex-cli 0.171.0 held an unanswered approval 904 s with no limit of its
+own) declines - waiting never approves; `--ask-timeout 0` restores the
+immediate decline. Requests you approve do not count toward exit `5`; the
+verdict line reports them as `(n approved by architect)`. The filter is
+lexical: read-only regex searches, PowerShell `$(...)` and every shell write it
+cannot model (any variable, `cd`, computed path, pipeline-fed target, nested
+shell, inline `python -c` that writes, encoded script) come to you instead of
+being auto-approved. A detached lane needs its stdout in a file you watch, or a
+poll on the printed approvals folder.
+
+**What `[ask]` guarantees on Windows - and what it does not.** Measured 25 Nov
+2026 (codex-cli 0.171.0, worker home `~/.codex-worker`): the sandbox log says
+`Windows sandbox selection: disabled`; every shell command asks for approval
+before it runs; an approved command runs with your full user token (its groups
+did not include `CodexSandboxUsers`) and wrote to `%LOCALAPPDATA%`. So the
+approval filter is the only boundary, and:
+- Guaranteed: nothing is approved by waiting, a decision file in the lane is
+  never read, a decision without the request's nonce is ignored, and you see
+  the whole command, escaped, before you decide.
+- Not guaranteed: a worker that gets ANY write auto-approved can write
+  anywhere you can - a script file in the lane, then `python script.py`, is a
+  read-only-looking command the filter approves. It can then read the nonce and
+  write the decision file itself. Against a hostile worker the channel is only
+  as strong as the filter, and the filter is lexical. An OS sandbox for the
+  worker home is the real fix; a deny ACE for `CodexSandboxUsers` on the private
+  root was not added, because measured commands do not carry that group.
 
 **Ask the worker why, after the turn.** `python dispatch.py --ask <task-dir>
 "why did you skip the probe?"` resumes the lane's last thread for one read-only
-turn with every approval declined, prints the answer and appends it to
-`<task-dir>/ASK.log`. It changes no lane file. The thread id comes from the
-private run folder (older runs: the last UUID in RAW_OUTPUT.log), the lane from
-the `<lane>/.delegate-runs/<task>` layout, and the Codex home only from
-`--codex-home` or the default `~/.codex-worker` - never from a file the worker
-could have written.
+turn with every approval declined, prints the answer (control, bidi, zero-width
+and combining characters escaped) and appends it to `ASK.log` in the private run
+folder, whose path it prints. It writes nothing into the lane. The thread id
+comes from the private run folder (runs with no private record at all: the last
+UUID in RAW_OUTPUT.log), the lane from the `<lane>/.delegate-runs/<task>` layout,
+and the Codex home only from `--codex-home` or the default `~/.codex-worker` -
+never from a file the worker could have written.
 
 **A provider can refuse a turn, and the refusal arrives as a completion.**
 `turn/completed` carries a `status` and, when it failed, `error.codexErrorInfo`.
