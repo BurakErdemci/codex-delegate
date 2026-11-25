@@ -353,7 +353,7 @@ def main() -> int:
         checks += [
             ("all approved: approved-by-architect is not a decline, rc=0",
              rc == 0 and lane.replies() == ["accept"] * 3
-             and "--- dispatch: OK (3 approved by architect) ---" in out),
+             and "--- dispatch: OK (3 approved by architect) [approvals=strict] ---" in out and "[approvals] strict" in out),
             ("all approved: a second answer to the same request is refused",
              decide(lane.task, 1, "decline").returncode == 2),
             ("--decide refuses an unknown request number", decide(lane.task, 9, "approve").returncode == 2),

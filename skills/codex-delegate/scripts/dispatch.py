@@ -1678,7 +1678,9 @@ def build_parser() -> argparse.ArgumentParser:
                          "probably looking for is sandbox_workspace_write.network_access=true, "
                          "which lets the worker's shell reach the network while keeping the "
                          "filesystem sandbox. Keys that would disable the sandbox are refused.")
-    ap.add_argument("--approvals", choices=["open", "strict"], default="open",
+    # default=None so the banner can tell "open (default)" from an explicit
+    # --approvals open; approvals_label() resolves it.
+    ap.add_argument("--approvals", choices=["open", "strict"], default=None,
                     help="open (default): approve every request except a short list of "
                          "hard-to-undo accidents (git push, discarding git work outside the "
                          "lane, recursive deletes outside the lane, writes to live data "
@@ -1697,6 +1699,12 @@ def build_parser() -> argparse.ArgumentParser:
                          "(rc=, verdict=, final=). Poll for this one file instead of building "
                          "a watcher per detached lane.")
     return ap
+
+
+def approvals_label(args: argparse.Namespace) -> tuple[str, str]:
+    """(mode, label): the mode in force, and how the banner names it."""
+    mode = args.approvals or "open"
+    return mode, mode if args.approvals else f"{mode} (default)"
 
 
 def run(args: argparse.Namespace) -> int:
@@ -1830,7 +1838,7 @@ def run(args: argparse.Namespace) -> int:
 
     with open(log_path, "a", encoding="utf-8") as log:
         log.write(f"\n===== dispatch {time.strftime('%Y-%m-%d %H:%M:%S')} "
-                  f"mcp={granted or 'none'} sandbox={args.sandbox} approvals={args.approvals} "
+                  f"mcp={granted or 'none'} sandbox={args.sandbox} approvals={approvals_label(args)[0]} "
                   f"config={args.config or 'none'} =====\n")
         log.flush()
         marker = dispatch_marker(args.repo)
@@ -1857,7 +1865,12 @@ def run(args: argparse.Namespace) -> int:
             return 1
         server.task_dir = task_dir
         server.ask_timeout = max(0, args.ask_timeout)
-        server.approvals_mode = args.approvals
+        server.approvals_mode, mode_label = approvals_label(args)
+        # Which mode governs this turn is the first thing to know when reading
+        # it: open approves nearly everything, strict asks about much of it.
+        log.write(f"[approvals] {mode_label}\n")
+        log.flush()
+        print(f"[approvals] {mode_label}", flush=True)
         try:
             server.run_dir = open_private_run(task_dir, [args.repo, task_dir])
         except (DispatchError, OSError) as exc:
@@ -1935,6 +1948,9 @@ def run(args: argparse.Namespace) -> int:
         # Approved by the architect is not a decline: the worker got what it
         # asked for, so the exit code stays 0 unless something else was refused.
         verdict += f" ({server.architect_approved} approved by architect)"
+    # Appended, not prefixed: pollers and greps match the verdict's start
+    # (verdict=OK, `dispatch: BLOCKED-BY-APPROVALS`).
+    verdict += f" [approvals={server.approvals_mode}]"
     verdict_line = f"--- dispatch: {verdict} ---"
     final_text = server.final_text or "(worker produced no final message)"
     # The verdict rides in FINAL.txt as well as stdout and the exit code: two

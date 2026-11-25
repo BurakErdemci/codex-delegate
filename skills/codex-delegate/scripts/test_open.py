@@ -117,7 +117,10 @@ def main() -> int:
         finally:
             dsp.dispatch_marker(lane.repo).unlink(missing_ok=True)
         checks += [
-            ("--approvals defaults to open", args.approvals == "open"),
+            ("--approvals defaults to open", dsp.approvals_label(args) == ("open", "open (default)")),
+            ("the default is announced as `[approvals] open (default)` on stdout and in the log",
+             "[approvals] open (default)" in out.getvalue() and "[approvals] open (default)" in lane.log()),
+            ("the verdict line names the mode", "--- dispatch: OK [approvals=open] ---" in out.getvalue()),
             ("open by default: the 3 field commands and an outside file change are approved, rc=0",
              rc == 0 and lane.replies() == ["accept"] * 4 and "[ask]" not in out.getvalue()),
         ]
@@ -128,6 +131,9 @@ def main() -> int:
         rc, out = lane.run("--approvals", "open", "--ask-timeout", "1")
         checks.append(("open: git push goes to [ask] and declines on timeout, rc=5",
                        rc == 5 and lane.replies() == ["decline"] and "[ask] 1 git push" in out))
+        checks.append(("an explicit --approvals open is announced without (default), verdict names it",
+                       "[approvals] open\n" in out and "(default)" not in out
+                       and "[approvals=open] ---" in out))
         lane2 = ta.Lane(root / "b", [dict(push, params={**push["params"], "cwd": str(root / "b" / "lane")})])
         t = ta.when_asked(lane2, {1: ta.answer("approve")})
         rc2, out2 = lane2.run("--approvals", "open", "--ask-timeout", "30")
