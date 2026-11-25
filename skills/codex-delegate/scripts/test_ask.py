@@ -391,6 +391,19 @@ def main() -> int:
             json.dumps({"thread_id": "../../etc"}), encoding="utf-8")
         rc_bad, _ = lane.ask("bad id?")
         checks.append(("a malformed thread id in the private record is refused (rc=2)", rc_bad == 2))
+        # A private run whose thread.json is missing or empty never falls back
+        # to the worker-writable log, even if the log names a valid UUID.
+        (lane.task / "RAW_OUTPUT.log").write_text(
+            '{"threadId": "0eeeeeee-eeee-4eee-8eee-eeeeeeeeeee5"}\n', encoding="utf-8")
+        for record in ("", None):
+            tfile = dsp.find_private_run(lane.task) / "thread.json"
+            if record is None:
+                tfile.unlink(missing_ok=True)
+            else:
+                tfile.write_text(record, encoding="utf-8")
+            rc_fb, _ = lane.ask("fallback?")
+            checks.append((f"private run with {'no' if record is None else 'an empty'} thread.json: "
+                           "no fallback to RAW_OUTPUT.log (rc=2)", rc_fb == 2))
         # An older run: no private record, so RAW_OUTPUT.log, UUIDs only.
         dsp._index_file(lane.task).unlink()
         (lane.task / "RAW_OUTPUT.log").write_text(

@@ -752,8 +752,9 @@ def lane_thread(task_dir: Path) -> str | None:
                       .get("thread_id", ""))
         except (OSError, ValueError, AttributeError):
             tid = ""
-        if tid:
-            return tid if _THREAD_ID.match(tid) else None
+        # A private run exists, so this is not an old run: a missing or empty
+        # record means no thread, never "ask the worker-writable log instead".
+        return tid if _THREAD_ID.match(tid) else None
     raw = task_dir / "RAW_OUTPUT.log"
     found = (_THREAD_ID_IN_LOG.findall(raw.read_text(encoding="utf-8", errors="replace"))
              if raw.is_file() else [])
