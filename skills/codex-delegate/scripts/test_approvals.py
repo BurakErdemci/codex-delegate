@@ -231,6 +231,21 @@ CASES += [
     ]],
 ]
 
+# A bare / is let through as an operator; in a command that writes or deletes
+# it is the filesystem root (found in the POSIX pass, 26 Nov 2026).
+CASES += [
+    *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (["find", "/", "-delete"], "find / -delete"),
+        (["sh", "-c", "find / -name '*.log' -delete"], "find / -delete inside a shell"),
+        (["find", "/", "-exec", "rm", "{}", ";"], "find / -exec rm"),
+    ]],
+    *[("approve", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (["find", ".", "-name", "*.pyc", "-delete"], "find -delete inside the lane"),
+        (["find", "/", "-name", "x"], "a read-only find from / stays approved"),
+        (["python", "-c", "print(ROOT / 'x')"], "Path division without a write stays approved"),
+    ]],
+]
+
 # Windows-shaped cases: a drive letter, a UNC root or a backslash-rooted
 # path is only a path on Windows. On POSIX the same strings are ordinary
 # characters and approving them is correct, so these run on Windows only and

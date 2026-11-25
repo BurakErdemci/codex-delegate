@@ -53,6 +53,8 @@ APPROVE = [
      "Remove-Item -Recurse of a lane path"),
     (CMD, {"command": ["cmd", "/c", "rd", "/s", "/q", "build"], "cwd": "."}, "rd /s of a lane path"),
     (CMD, {"command": PS + "'rm -Force old.txt'", "cwd": "."}, "-Force is not -Recurse"),
+    (CMD, {"command": ["find", "build", "-name", "*.o", "-delete"], "cwd": "."}, "find -delete of a lane path"),
+    (CMD, {"command": ["sh", "-c", "find -name '*.pyc' -delete"], "cwd": "."}, "find -delete from the lane cwd"),
     (CMD, {"command": PS + "'Get-Content ~/.claude/settings.json'", "cwd": "."}, "reading a live data folder"),
     (CMD, {"command": ["bash", "-lc", "echo x > ~/.codex-worker/note.txt"], "cwd": "."},
      ".codex-worker is not .codex"),
@@ -90,6 +92,10 @@ ASK = [
     (FILE, {"path": "/home/x/.unity_architect_ai/token"}, "a file change in .unity_architect_ai"),
     (CMD, {"command": ["sh", "-c", "rm -rf /outside"], "cwd": "."}, "rm -rf of an absolute outside path"),
     (CMD, {"command": ["sh", "-c", "rm -r ../.."], "cwd": "."}, "rm -r ../.. escaping the lane"),
+    (CMD, {"command": ["find", "/", "-delete"], "cwd": "."}, "find / -delete"),
+    (CMD, {"command": ["sh", "-c", "find .. -name '*.tmp' -delete"], "cwd": "."}, "find .. -delete"),
+    (CMD, {"command": ["find", "/tmp", "-exec", "rm", "{}", ";"], "cwd": "."}, "find /tmp -exec rm"),
+    (CMD, {"command": ["sh", "-c", "find $D -delete"], "cwd": "."}, "find of a variable with -delete"),
 ]
 # Windows-shaped targets (drive, backslash-relative): only paths on Windows,
 # so run there and counted as skipped elsewhere.

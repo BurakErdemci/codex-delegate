@@ -547,6 +547,7 @@ _WRITE = re.compile(
     r"|sc|ac|ni|cpi|mi|ri|rni|si|tee|cp|copy|xcopy|robocopy|mv|move|rm|del|erase|rd|rmdir"
     r"|md|mkdir|ren|rename|mklink|subst|attrib|icacls|takeown|touch|ln|install|dd|truncate"
     r"|chmod|chown|sed|git|pip|npm|curl|wget|tar|unzip|7z)(?![\w-])"
+    r"|(?<![\w-])-(?:delete|exec|execdir|ok)(?![\w-])"   # find's deleting/executing actions
     r"|writeall|appendall|::create|::copy|::move|::delete|::replace|::encrypt|::decrypt"
     r"|createdirectory|createtext|appendtext|streamwriter|filestream|\.save\(|\.write"
     r"|open\(|write_text|write_bytes|shutil\.|os\.(?:remove|unlink|rename|replace|mkdir|makedirs"
@@ -676,6 +677,13 @@ def approval_decision(method: str, params: dict, lane_root: Path, *,
         objection = scan_tokens(tokens, lane_root, cwd_abs, exempt_program=True)
         if objection:
             return "decline", objection[1]
+        # A lone / or \ is let through scan_tokens as an operator (Python's
+        # `ROOT / 'x'`), so `find / -delete` passed as "scoped to lane" (found
+        # in the POSIX test pass, 26 Nov 2026). In a command that writes or
+        # deletes, a bare separator is the filesystem root.
+        if (any(t.strip(_TOKEN_WRAP) in ("/", "\\") for t in tokens)
+                and _WRITE.search(_command_text(command))):
+            return "decline", "a bare filesystem root in a command that writes or deletes"
         unseen = _write_gate(command)
         if unseen:
             return "decline", unseen
@@ -751,6 +759,18 @@ def _open_guard(text: str, lane_root: Path, cwd_abs: str) -> str | None:
                 return f"git {sub} that discards work, on a repo that may not be the lane"
         for i, name in enumerate(names):
             args = words[i + 1:]
+            if name == "find" and any(a in ("-delete", "-exec", "-execdir", "-ok") for a in args):
+                # find [start...] [expression]: the starts are what it walks;
+                # none means the cwd.
+                starts = []
+                for a in args:
+                    if a.startswith(("-", "(", "!")):
+                        break
+                    starts.append(a)
+                for t in starts or ["."]:
+                    if _NOT_LITERAL_CHARS.search(t) or not _inside_lane(t, lane_root, cwd_abs):
+                        return f"find that deletes or executes under {t!r}, not a literal path inside the lane"
+                continue
             if not any(name in progs and test(args) for progs, test in _RECURSIVE_DELETE):
                 continue
             targets = [a for a in args if not a.startswith("-") and not _is_cmd_switch(a)]
