@@ -77,12 +77,8 @@ ASK = [
     (CMD, {"command": ["bash", "-lc", "rm -rf /tmp/x"], "cwd": "."}, "rm -rf of an outside path"),
     (CMD, {"command": ["bash", "-lc", "rm -rf $DIR"], "cwd": "."}, "rm -rf of a variable"),
     (CMD, {"command": ["bash", "-lc", "rm -r ../sibling"], "cwd": "."}, "rm -r escaping the lane"),
-    (CMD, {"command": PS + "'Remove-Item -Recurse C:\\Users\\x\\proj'", "cwd": "."}, "Remove-Item -Recurse outside"),
     (CMD, {"command": PS + "'ri -r $target'", "cwd": "."}, "ri -r of a variable"),
     (CMD, {"command": PS + "'Remove-Item -Recurse'", "cwd": "."}, "a recursive delete with no target"),
-    (CMD, {"command": ["cmd", "/c", "rd", "/s", "/q", "C:\\proj"], "cwd": "."}, "rd /s outside"),
-    (CMD, {"command": ["cmd", "/c", "rmdir", "/s", "..\\x"], "cwd": "."}, "rmdir /s escaping the lane"),
-    (CMD, {"command": ["cmd", "/c", "del", "/s", "C:\\x\\*.log"], "cwd": "."}, "del /s outside"),
     (CMD, {"command": PS + "'Set-Content ~/.unity_architect_ai/x 1'", "cwd": "."}, "write to .unity_architect_ai"),
     (CMD, {"command": PS + "'Remove-Item $env:USERPROFILE\\.unity_architect_ai\\db.sqlite'", "cwd": "."},
      "delete in .unity_architect_ai"),
@@ -92,7 +88,20 @@ ASK = [
     (CMD, {"command": PS + "'Add-Content C:\\Users\\x\\.claude\\settings.json x'", "cwd": "."}, "write into .claude"),
     (FILE, {"path": "C:\\Users\\x\\.claude\\settings.json"}, "a file change in .claude"),
     (FILE, {"path": "/home/x/.unity_architect_ai/token"}, "a file change in .unity_architect_ai"),
+    (CMD, {"command": ["sh", "-c", "rm -rf /outside"], "cwd": "."}, "rm -rf of an absolute outside path"),
+    (CMD, {"command": ["sh", "-c", "rm -r ../.."], "cwd": "."}, "rm -r ../.. escaping the lane"),
 ]
+# Windows-shaped targets (drive, backslash-relative): only paths on Windows,
+# so run there and counted as skipped elsewhere.
+WINDOWS_ASK = [
+    (CMD, {"command": PS + "'Remove-Item -Recurse C:\\Users\\x\\proj'", "cwd": "."}, "Remove-Item -Recurse outside"),
+    (CMD, {"command": ["cmd", "/c", "rd", "/s", "/q", "C:\\proj"], "cwd": "."}, "rd /s outside"),
+    (CMD, {"command": ["cmd", "/c", "rmdir", "/s", "..\\x"], "cwd": "."}, "rmdir /s escaping the lane"),
+    (CMD, {"command": ["cmd", "/c", "del", "/s", "C:\\x\\*.log"], "cwd": "."}, "del /s outside"),
+]
+if sys.platform == "win32":
+    ASK += WINDOWS_ASK
+SKIPPED_ON_POSIX = 0 if sys.platform == "win32" else len(WINDOWS_ASK)
 
 
 def main() -> int:
@@ -149,6 +158,8 @@ def main() -> int:
     for name, ok in checks:
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'}  {name}")
+    if SKIPPED_ON_POSIX:
+        print(f"skipped on POSIX: {SKIPPED_ON_POSIX} Windows-shaped cases")
     print(f"\n{len(checks) - failures}/{len(checks)} cases hold")
     return 1 if failures else 0
 

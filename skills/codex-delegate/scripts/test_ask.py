@@ -523,7 +523,40 @@ def main() -> int:
         checks.append(("--ask refuses a task dir outside the <lane>/.delegate-runs/<task> layout",
                        rc6 == 2 and "layout" in out.getvalue()))
 
+    # The real private-root branch, not the CODEX_DELEGATE_STATE_DIR override
+    # every Lane uses: XDG_STATE_HOME on POSIX (owner-only), LOCALAPPDATA on
+    # Windows, both pointed at a temp dir so nothing lands in the real home.
+    skipped = 0
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        base_var = "LOCALAPPDATA" if os.name == "nt" else "XDG_STATE_HOME"
+        saved = {k: os.environ.get(k) for k in ("CODEX_DELEGATE_STATE_DIR", base_var)}
+        try:
+            os.environ.pop("CODEX_DELEGATE_STATE_DIR", None)
+            os.environ[base_var] = str(root / "state")
+            task = root / "lane" / ".delegate-runs" / "t1"
+            task.mkdir(parents=True)
+            run_dir = dsp.open_private_run(task, [root / "lane"])
+            expect_root = root / "state" / "codex-delegate" / "runs"
+            checks.append((f"the real private root is {base_var}/codex-delegate/runs",
+                           dsp.private_root() == expect_root and dsp._within(run_dir, expect_root)
+                           and dsp.find_private_run(task) == run_dir))
+            if os.name != "nt":
+                dirs = [expect_root, expect_root / "index", run_dir, run_dir / "approvals"]
+                checks.append(("real private root, index, run and approvals folders are 0o700",
+                               all((d.stat().st_mode & 0o777) == 0o700 for d in dirs)))
+            else:
+                skipped += 1
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     failures = 0
+    if skipped:
+        print(f"skipped on Windows: {skipped} POSIX mode-bit check(s)")
     for name, ok in checks:
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'}  {name}")

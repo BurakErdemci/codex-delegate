@@ -208,18 +208,38 @@ PS_SUBEXPR_THEN_GIT = '"C:\\\\WINDOWS\\\\System32\\\\WindowsPowerShell\\\\v1.0\\
 FIELD_2026_11_25 = (RG_REGEX, PS_RECORDS_REGEX, PS_SUBEXPR_THEN_GIT)
 
 CASES += [
-    ("decline", CMD, {"command": RG_REGEX, "cwd": "."},
-     r"rg pattern \(set\(_own_ids\) reads as a UNC root: filter declines, architect is asked"),
     ("decline", CMD, {"command": PS_RECORDS_REGEX, "cwd": "."},
      r"PowerShell regex (\.delegate-runs/\S+) reads as rooted: filter declines, architect is asked"),
     ("decline", CMD, {"command": PS_SUBEXPR_THEN_GIT, "cwd": "."},
      "PowerShell $(...) beside git status: filter declines, architect is asked"),
-    # --- true outside paths dressed with regex fragments: always decline ---
     *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
-        (RG_REGEX[:-1] + ' C:/Users/x/.codex/auth.json"', "outside path next to a regex"),
         (PS_SUBEXPR_THEN_GIT[:-1] + "\ngit push'", "git push inside a PowerShell script"),
         (PS_RECORDS_REGEX[:-1] + "\nSet-Content -LiteralPath C:/Users/x/out.txt -Value 1'",
          "outside write in a regex-carrying script"),
+    ]],
+    # POSIX-shaped outside paths: outside the lane on every platform (on
+    # Windows a rooted /x lands on the lane's drive, outside the lane).
+    *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (["cat", "/etc/passwd\\s+"], "POSIX absolute path + \\s+ as a plain arg"),
+        (["cat", "/Users/other/.ssh/id_rsa"], "another user's home as a plain arg"),
+        (["cat", "../../secret\\S+"], "../../ escape as a plain arg"),
+        (["rg", "-n", r"\(set\(_own_ids\)", "/Users/other/secret"], "POSIX absolute path as rg's PATH operand"),
+        (["rg", "-n", "pat", "../../secret"], "../../ escape as rg's PATH operand"),
+        (["sh", "-c", "rm -rf /outside"], "rm -rf of an absolute outside path"),
+        (["sh", "-c", "rm -r ../.."], "rm -r escaping the lane"),
+        (["bash", "-lc", "rg -n '\\(a\\)' /Users/other/secret"], "rg PATH inside a shell script"),
+    ]],
+]
+
+# Windows-shaped cases: a drive letter, a UNC root or a backslash-rooted
+# path is only a path on Windows. On POSIX the same strings are ordinary
+# characters and approving them is correct, so these run on Windows only and
+# are counted as skipped elsewhere - never silently dropped.
+WINDOWS_CASES = [
+    ("decline", CMD, {"command": RG_REGEX, "cwd": "."},
+     r"rg pattern \(set\(_own_ids\) reads as a UNC root: filter declines, architect is asked"),
+    *[("decline", CMD, {"command": cmd, "cwd": "."}, why) for cmd, why in [
+        (RG_REGEX[:-1] + ' C:/Users/x/.codex/auth.json"', "outside path next to a regex"),
         (["cmd", "/c", "type", r"C:\Users\x\.ssh\id_rsa\s+"], r"drive path + \s+ as a plain arg"),
         (["cmd", "/c", "type", r"\(x\)\..\..\secret\S+"], r"rooted path opening with \( as a plain arg"),
         (["cmd", "/c", "type", r"..\..\secret\s+"], r"..\..\ escape + \s+ as a plain arg"),
@@ -232,6 +252,11 @@ CASES += [
         (["powershell", "-Command", r"rg -n '\(a\)' C:\Users\x\secret\s+"], "rg PATH inside a shell script"),
     ]],
 ]
+if WIN:
+    CASES += WINDOWS_CASES
+    SKIPPED_ON_POSIX = 0
+else:
+    SKIPPED_ON_POSIX = len(WINDOWS_CASES)
 
 
 # Writes the scan cannot resolve go to the architect (measured 25 Nov 2026: no
@@ -631,6 +656,9 @@ def main() -> int:
     failures += check_brief_line()
     total = (len(CASES) + len(ACCEPTANCE_CASES) + len(TEST_EDIT_CASES)
              + ACCEPT_ENV_CHECKS + BRIDGE_CHECKS + BRIEF_CHECKS)
+    if SKIPPED_ON_POSIX:
+        print(f"skipped on POSIX: {SKIPPED_ON_POSIX} Windows-shaped cases "
+              "(drive, UNC and backslash-rooted paths are not paths here)")
     print(f"\n{total - failures}/{total} cases hold")
     return 1 if failures else 0
 

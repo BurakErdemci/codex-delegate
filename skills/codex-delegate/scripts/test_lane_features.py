@@ -307,7 +307,10 @@ def marker_cases(tmp: Path) -> None:
                 refused = "not a private directory" in str(exc)
             check("accept root rejects non-private POSIX mode", refused)
             root.chmod(0o700)
-            check("accept root allows private POSIX mode", nl.accept_scratch("x") == root / "x")
+            # Resolved on both sides: macOS TMPDIR /var/folders is a symlink to
+            # /private/var, and accept_scratch returns the resolved path.
+            check("accept root allows private POSIX mode",
+                  Path(nl.accept_scratch("x")).resolve() == (root / "x").resolve())
         finally:
             tempfile.tempdir = tempdir
 
