@@ -878,7 +878,9 @@ def ask_codex(argv: list[str]) -> int:
         finally:
             if server is not None:
                 server.close()
-    answer = server.final_text.strip() or "(no answer)"
+    # Escaped like a request: the answer is worker text too (audit), and a raw
+    # ESC sequence in it would reach the architect's terminal. Newlines stay.
+    answer = shown(server.final_text.strip() or "(no answer)", keep_newlines=True)
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     ask_log = ask_log_path(task_dir)
     with open(ask_log, "a", encoding="utf-8") as fh:

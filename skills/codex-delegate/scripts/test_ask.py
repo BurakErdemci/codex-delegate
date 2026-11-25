@@ -428,6 +428,12 @@ def main() -> int:
              (victim / "keep.txt").read_text(encoding="utf-8") == "untouched"),
         ]
         (lane.task / "ASK.log").unlink()
+        lane.scenario([], answer_prefix="first\x1b[2J\x08line\nsecond line")
+        rc_esc, out_esc = lane.ask("control characters?")
+        checks.append(("--ask escapes ESC and BS in the answer and keeps its newlines",
+                       rc_esc == 0 and "first\\x1b[2J\\x08line\nsecond line" in out_esc
+                       and "\x1b" not in out_esc and "\x08" not in out_esc
+                       and "\x1b" not in private_log.read_text(encoding="utf-8")))
         # Malformed id in the private record is refused, not passed on.
         (dsp.find_private_run(lane.task) / "thread.json").write_text(
             json.dumps({"thread_id": "../../etc"}), encoding="utf-8")
